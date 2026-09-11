@@ -120,6 +120,61 @@ RUN mkdir -p \
     ln -sf /usr/lib/aarch64-linux-gnu /usr/local/gcc-7.4.0/lib64 && \
     ln -sf /bin/bash /usr/local/bash-5.0/bin/bash
 
+# ------------------------------------------------------------------------------
+# Precompiled header for the C++ compile path
+# ------------------------------------------------------------------------------
+# Gator++ submissions are C++ programs that include <iostream> almost without
+# exception, and parsing it -- plus the <ostream>/<string> machinery it pulls in
+# -- was measured at 190-290 ms of every cold compile. Precompiling it once here
+# takes that cost out of every submission.
+#
+# A precompiled header is only usable by a compiler that matches it, so it is
+# built here from this image's own toolchain, headers and defaults. The exact
+# identity it has to match is:
+#
+#   architecture      aarch64 -- the only architecture this image builds for
+#   compiler binary   /usr/bin/g++, the binary every /usr/local/gcc-*/bin/g++
+#                     symlink above points at, i.e. the one the C++ language
+#                     rows actually invoke
+#   compiler version  whatever this base image ships (11.4.0 today)
+#   C++ standard      the driver's default for C++ (gnu++17 on GCC 11), because
+#                     the worker does not pass -std
+#   flags             -O0 -pipe, the default compiler_options for C++
+#   standard library  this image's libstdc++ headers, resolved by asking the
+#                     compiler rather than hardcoding a version directory, so a
+#                     base-image bump cannot leave a stale path behind
+#
+# A stale PCH cannot survive a toolchain change -- it is produced during the
+# build, from the same layer the compiler comes from -- and it cannot be handed
+# to a different compiler at run time, because the worker verifies its digest
+# before offering it (see app/services/pch.rb).
+#
+# The canary is the part that fails the build instead of the student: `-H` marks
+# a *consumed* precompiled header with '!', so if the production argv would not
+# pick this PCH up, this RUN fails and no image is produced. A PCH that is
+# unusable for any reason therefore cannot reach a submission.
+#
+# `-Winvalid-pch` is deliberately not part of the production argv: when a
+# student passes their own compiler_options that invalidate the PCH, GCC falls
+# back silently, and a warning about it would land in that student's compile
+# output as if it were a diagnostic about their code.
+#
+# Recovery: rebuild. If the header path moves, the compiler's own `-M` lookup
+# below follows it; if a `-std=` or another flag is ever added to the C++ compile
+# path, rebuild the PCH with that same flag set, or drop `Pch` and accept the
+# slower compile.
+RUN set -eux; \
+    mkdir -p /usr/local/pch/c++; \
+    iostream=$(printf '#include <iostream>\n' | /usr/bin/g++ -x c++ -M - | tr ' ' '\n' | grep -m1 '/iostream$' || true); \
+    test -n "$iostream" || { echo "PCH: could not resolve <iostream> through /usr/bin/g++; is g++ installed?"; exit 1; }; \
+    /usr/bin/g++ -O0 -pipe -x c++-header "$iostream" -o /usr/local/pch/c++/iostream.gch; \
+    printf '#include <iostream>\nint main() { return 0; }\n' > /tmp/pch_canary.cpp; \
+    /usr/bin/g++ -O0 -pipe -I/usr/local/pch/c++ -H -o /tmp/pch_canary.bin /tmp/pch_canary.cpp 2>/tmp/pch_canary.err; \
+    grep -q '^! /usr/local/pch/c++/iostream.gch$' /tmp/pch_canary.err; \
+    cd /usr/local/pch/c++ && sha256sum iostream.gch > pch.sha256; \
+    chmod 0644 iostream.gch pch.sha256; \
+    rm -f /tmp/pch_canary.cpp /tmp/pch_canary.bin /tmp/pch_canary.err
+
 WORKDIR /api
 
 # Install bundler and gems

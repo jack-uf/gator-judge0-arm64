@@ -47,6 +47,7 @@ ENV["COMPILATION_CACHE_DIR"] = File.join(CACHE_DIR, "binaries")
 # The fingerprint reads the compiler through ExecPlan, which Zeitwerk autoloads
 # in the worker. Loading it by hand here keeps the check runnable standalone.
 require_relative "#{ROOT}/judge0-src/app/services/exec_plan"
+require_relative "#{ROOT}/judge0-src/app/services/pch"
 require_relative "#{ROOT}/judge0-src/app/services/compilation_cache"
 
 FAILURES = []
@@ -114,6 +115,19 @@ check CompilationCache.toolchain_fingerprint("/usr/bin/g++").include?("/usr/bin/
       "the toolchain fingerprint names the compiler"
 check CompilationCache.toolchain_fingerprint("/nonexistent/cc").start_with?("unknown"),
       "an unresolvable compiler degrades to a coarse key rather than a crash"
+
+# The PCH is built from the same compiler the fingerprint above stats, but it can
+# be rebuilt on its own -- a header added to the set changes what the compiler
+# reads while the compiler binary stays byte-identical. Overriding the term is
+# the only way to test that here: this host has no PCH installed, so the real
+# value is the same constant everywhere.
+pch_original = Pch.method(:fingerprint)
+Pch.define_singleton_method(:fingerprint) { |*_args| "pch:rebuilt" }
+check CompilationCache.cache_key(submission) != base,
+      "a rebuilt PCH set changes the key even when the compiler does not"
+Pch.define_singleton_method(:fingerprint, pch_original)
+check_eq CompilationCache.cache_key(submission), base,
+         "restoring the PCH restores the key"
 
 # The Go, Prolog and Cobol definitions put an assignment in front of the
 # compiler (`GOCACHE=... /usr/local/go/bin/go build ...`). Splitting the string

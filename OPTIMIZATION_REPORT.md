@@ -229,7 +229,9 @@ concurrency sweep behind it was undersampled -- see section 9 caveat 3 -- so
 `82.29 req/s` was not a supportable number, and the baseline's old sweep is not
 comparable to it level for level either. The corrected throughput measurement
 for the current state stands on its own in section 9 caveat 3: 76.59 req/s at
-concurrency 25 with 200 requests, degrading past that knee.
+concurrency 25 with 200 requests, degrading past that knee. That curve is a
+cache-hit curve -- section 17 is where the mechanism behind it, and the
+12-worker pool structure underneath it, are attributed.
 
 ## 9. Three caveats you should not read past
 
@@ -290,9 +292,15 @@ Two 400-request confirmation runs put concurrency 25 at 66.97 and 68.82 req/s
 and concurrency 50 at 60.00 and 59.11 req/s. So the curve rises to a knee near
 concurrency 25 and then degrades: by concurrency 50 the p50 has more than
 doubled while throughput falls. That is the shape to size a deployment against,
-and it replaces the earlier "unresolved, do not guess" note. The cause of the
-degradation past the knee has still not been attributed, and is not guessed at
-here.
+and it replaces the earlier "unresolved, do not guess" note. Section 17 carries
+the attribution as far as this fork's structure allows: a 12-worker pool behind
+24 API slots, with Postgres, Redis, memory, the cgroup CPU limit and context
+switches all flat at the moment the cold curve knees. This cache-hit curve is
+not bound by that pool -- section 17's control sweep takes the same pool to
+84.57 req/s at concurrency 100, limited there by the client driver rather than
+by the system. What section 17 leaves open is the absolute size of the cold,
+compile-bearing execution window: host descheduling versus blocking in the
+compile pathway, separable only by per-stage counters inside the worker.
 
 Read the throughput row of every stage table in this report with that in mind:
 at 10-100 requests per level, the shipped sweep cannot support a throughput
@@ -642,9 +650,16 @@ it (section 9 caveat 2), and the concurrency-10 stall was an undersampled sweep
 3. **`ENABLE_WAIT_RESULT`** defaults to true and Gator++ uses it, so these
    numbers are the synchronous worst case. The callback or async path was not
    measured.
-4. **Throughput falls past concurrency 25.** The curve is measured; the
-   mechanism is not, and is not guessed at here. Anyone sizing past 25
-   concurrent submissions should attribute that knee first.
+4. **Throughput falls past a knee, and section 17 puts the pool at 12, not 25.**
+   The worker count is `nproc` = 12 Resque workers behind 2 x 12 API slots, so
+   the saturated stage opens at 13 concurrent compile-bearing submissions and
+   the shipped ladder's opening rung was already past it. Section 17 exhausts
+   the attributions -- Postgres, Redis, memory, the cgroup CPU limit and context
+   switches are all flat when the knee happens, and the pool's own arithmetic
+   reproduces measured throughput within 6% at every rung. What is left is the
+   size of the saturated execution window itself, and the instrument for that is
+   per-stage counters inside the worker, not a larger pool. Anyone sizing past 12
+   concurrent **compile-bearing** submissions should read section 17 first.
 5. **`batch_create`** does N independent saves plus N `exists?` queries. The
    brief caps the batch at 20, which bounds it, but it is still N round trips.
 6. **An x86-64 binary is still shipped in an ARM64 image.** `judge0-src/bin/telemetry`
@@ -970,3 +985,305 @@ Three things are deliberately outside both repositories: the Docker image and
 the compilation cache are build and runtime artifacts, and the Postgres and
 Redis volumes are data. Both reproduce from the two repositories plus
 `docker compose up -d --build`.
+
+## 17. What bounds throughput, and what does not
+
+**Status: the structure is attributed; the absolute numbers of the saturated
+stage are not, and this section says so as a finding rather than leaving it as
+an omission.** Section 9 caveat 3 measured *that* the curve falls past a knee.
+This section asks why, and the answer is not a queue, a store, a lock or a
+cgroup limit. It is the shape of the worker pool plus how long one submission
+occupies a worker -- and the second half of that sentence is where the remaining
+unknown sits.
+
+The three probes behind this section are scratch instruments rather than
+committed harnesses, so each one's method is given in full below. That is
+deliberate: the version-control caveat at the end of section 16 is the record of
+what a number costs when its instrument cannot be re-read.
+
+### The pool is 12 workers and 24 request slots
+
+`judge0-src/scripts/load-config:38` starts `COUNT=${COUNT:-$(nproc)}` Resque
+workers, and the same file sets `RAILS_SERVER_PROCESSES=2` and
+`RAILS_MAX_THREADS=$(nproc)` (`:23-24`), which `judge0-src/config/puma.rb:1-4`
+turns into the API server. Inside the worker container `nproc` is 12, so the
+stack is **12 workers against 2 x 12 = 24 API request slots**, confirmed live
+again this session. Two independent samplers agree at every rung of the ladder:
+Redis reports `redis_workers = 12` flat, and the sandbox sampler pins
+`isolate_procs_max` at **24 = 12 x 2** from concurrency 16 upward, which is the
+12 workers each holding one isolate process.
+
+So at most `min(c, 12)` submissions execute at once, and the ladder is staged
+like this:
+
+| Stage | Concurrency | What is actually happening |
+| --- | --- | --- |
+| unsaturated | 1, 2, 4, 8 | every submission gets its own worker; queue wait is tens of ms |
+| the boundary | 12 | the pool first runs full |
+| supersaturated | 16, 25, 32, 50, 75, 100 | arrivals queue behind the pool; extra concurrency buys nothing |
+
+**This contradicts the premise the shipped brief sizes against.** The brief puts
+the knee at concurrency 25 and asks for the mechanism past it. On this fork the
+saturated stage opens at 13, so the committed ladder's opening rung at 25 was
+already past the knee, and concurrency 50 and 100 are four and eight times the
+pool. P2 should be read against 12, not 25.
+
+### One law holds at every rung
+
+Divide the pool depth by the measured execution window and you get the measured
+throughput back:
+
+```
+throughput (req/s)  =  min(concurrency, 12) / execution_mean (s)
+```
+
+| Concurrency | Throughput req/s | `execution_mean` ms | `min(c,12)/exec` | Ratio |
+| --- | --- | --- | --- | --- |
+| 1 | 2.28 | 418.8 | 2.39 | 1.05 |
+| 2 | 3.40 | 567.6 | 3.52 | 1.04 |
+| 4 | 3.77 | 1010.0 | 3.96 | 1.05 |
+| 8 | 3.77 | 2009.5 | 3.98 | 1.06 |
+| 16 | 1.71 | 6651.1 | 1.80 | 1.05 |
+| 25 (opening) | 7.17 | 1618 | 7.42 | 1.03 |
+| 25 (closing) | 1.14 | 9984 | 1.20 | 1.05 |
+| 32 | 1.92 | 5922.8 | 2.03 | 1.06 |
+| 50 | 1.85 | 6163.5 | 1.95 | 1.05 |
+| 75 | 1.96 | 5782.1 | 2.08 | 1.06 |
+| 100 | 2.22 | 5224.0 | 2.30 | 1.04 |
+
+This is Little's law applied to the pool, so it is close to a tautology, and it
+is not offered as a discovery. What makes it worth a table is the range it holds
+over: the execution window moves **24x** across these rungs -- 419 ms to 9 984 ms
+-- and the law still lands within 6% at every one, with the same sign (it
+over-predicts slightly, which is the driver's own startup). Nothing else in the
+system is a first-order term. The saturated stage therefore has exactly one free
+parameter, the execution window, and everything that follows is about what moves
+it.
+
+### Where a worker's CPU actually goes
+
+A per-PID sampler read `/proc/<pid>/stat` every 20 ms while the harness's own
+cold workload ran, bracketed by the container's exact cgroup CPU window, so the
+split could be checked against the whole. It reduces `comm` to a family and
+sums each PID's own `utime + stime` delta:
+
+| | c=1, 30 submissions | c=32, 200 submissions |
+| --- | --- | --- |
+| container cgroup window | 10 629 ms | 97 916 ms |
+| sampled per-PID CPU (a lower bound) | 8 040 ms (76%) | 78 830 ms (81%) |
+| of it: `ruby3.0` | 4 480 ms (**42.1%**) | 53 220 ms (**54.4%**) |
+| of it: the compiler (`cc1plus`, `as`, `ld`) | 3 210 ms (**30.2%**) | 24 450 ms (**25.0%**) |
+| of it: this probe's own shells | 340 ms (3.2%) | 1 120 ms (1.1%) |
+| sampled CPU **per submission** | **268 ms** | **394 ms** |
+| per submission, phased | ruby 149 ms / compile 107 ms | ruby 266 ms / compile 122 ms |
+
+Two readings come out of this, and they point in opposite directions.
+
+**The compiler is a stable quarter to a third of the work, per submission and
+across the ladder.** Per-submission compiler CPU barely moves, 107 ms to 122 ms,
+while the run gets six times more concurrent. If compile capacity were the thing
+that saturates, that column would be the one climbing. It is the flattest number
+in the section, so any compile-stage change -- including the precompiled header
+of section 16 -- has a 25-30% ceiling on worker CPU and not the submission.
+
+**The Ruby side is where the growth is: 42% of the window at c=1, 54% at c=32,
+and 1.47x per submission.** Within the Ruby total, PIDs 55-66 -- the 12 Resque
+workers, all children of PID 28 -- own 4 400 of 4 480 ms at c=1 and 53 040 of
+53 220 ms at c=32. The two Puma processes cost 20 ms and 40 ms respectively:
+**under 0.2% of the window at every level, so the API tier is not in this
+picture at all.** "Ruby" here means the workers, and the fixed per-submission
+overhead section 16 identified as the largest remaining cost is theirs.
+
+### What is not the limiter
+
+Each of these was measured at every rung of the same ladder, and each one is
+flat enough to exclude:
+
+| Candidate | Reading across cold c=1 to c=100 | Verdict |
+| --- | --- | --- |
+| Postgres | 37 connections, 36 waiting, 1 active -- identical at all eleven rungs; `blks_read = 0`; 0 deadlocks; `xact_rollback = 0` | no headroom consumed, and no growth in demand |
+| Redis | `BLPOP` p99 24 µs at c=1, 214 µs at c=8, 242 µs at c=100. The `BLPOP` wait itself *falls*, 151 ms to 0.7-1.7 ms, while commands per submission rise ~2.5x | microsecond-scale queue, and the queue is empty |
+| memory | `swap_in_pages = swap_out_pages = 0`, `major_faults = 0`, `disk_read_sectors = 0`; worker peak 1 216 MiB rising to 1 757 MiB and falling to 1 653 MiB at c=100; `mem_available` 4 837-5 062 MiB; `psi_memory_some = 0.0` at every rung | nothing is paging, nothing is close |
+| the CPU limit | `nr_throttled = 0.0` at every rung in the worker, db and server cgroups | the container never hit its quota |
+| context switches and forks | 743 k to 4.73 M context switches; 2 696 to 14 023 forks, i.e. 70-90 forks per submission | a consequence of the work, not a ceiling on it |
+| host pressure | `host psi_cpu_some` 2.03 -> 10.93 -> 7.61% and `worker psi_cpu_some` 0.43 -> 11.00 -> 6.15% agree within ~2 pp | **open** -- see below |
+
+The last row is the one that cannot be closed from here. A container inside the
+Docker Desktop VM reads the Mac's steal as its own pressure, so these two fields
+cannot be told apart by this instrument. That is the honest state: the
+question of how much of the saturated stage is the host rather than the stack
+stays open, and no steal figure is asserted.
+
+### The control: the same pool with the compiler removed
+
+The `hit` sweep is the cold sweep with one variable removed. It submits the same
+source every time, so every submission is a compilation-cache hit, while the
+sandbox still runs and the program still executes. Same image, same 12 workers,
+same 24 slots, same Postgres, same Redis, same day:
+
+| Concurrency | Throughput req/s | `cpu_ms_per_submission` | `execution_mean` ms |
+| --- | --- | --- | --- |
+| 8 | 14.30 | 238 | 167 |
+| 16 | 26.62 | 140 | 108 |
+| 25 (opening) | 69.47 | 49 | 48 |
+| 32 | 28.30 | 115 | 126 |
+| 100 | **84.57** | **34.2** | 28 |
+| 25 (closing) | 65.06 | 60 | 71 |
+
+Two things follow. First, **the pool is not what bounds the cold run.** With the
+compile gone the identical pool carries **84.57 req/s -- 38x the 2.22 req/s of
+the cold c=100 rung** -- and it is not even working hard: at `execution_mean` of
+28 ms and `cpu_ms_per_submission` of 34 ms, a request occupies a slot for
+milliseconds and the pool has room for ~400 req/s. The run is limited by the
+100-client driver, not by the system: 84.57 req/s at a 1 203 ms p50 is 102
+requests in flight against 100 client slots. 84.57 is a floor, not a ceiling.
+
+Second, this settles P2 in the negative from the other end. No store, no memory
+exhaustion, no cgroup throttle and no context-switch ceiling can produce a knee
+at 12, and none of them is at a limit when the knee happens. The pool structure
+does produce the knee exactly where the arithmetic says it must, and the compile
+is the only stage whose removal changes the answer by an order of magnitude.
+
+### Compile width, measured separately
+
+The ladder says how many submissions the stack serves; it does not say how a
+burst of compiles behaves, because that is a compile-stage question and needs
+its own probe. 96 fixed compiles per level, two repetitions per arm, both arms
+reporting zero failures, wall in seconds for the whole batch (the mean of the
+two reps):
+
+| Width | Wall s, PCH | Wall s, no PCH | Compiles/s, PCH | Compiles/s, no PCH | PCH saving |
+| --- | --- | --- | --- | --- | --- |
+| 1 | 15.4 | 22.3 | 6.2 | 4.3 | 1.43x |
+| 2 | 7.5 | 11.1 | 12.9 | 8.7 | 1.47x |
+| 4 | 4.3 | 6.2 | 22.2 | 15.6 | 1.41x |
+| 6 | 3.3 | 4.8 | 29.1 | 20.2 | 1.43x |
+| 8 | 3.0 | 4.3 | **32.4** | **22.4** | 1.44x |
+| 12 | 3.4 | 4.5 | 28.4 | 21.2 | 1.36x |
+| 16 | 3.2 | 4.8 | 30.5 | 20.2 | 1.50x |
+| 24 | 3.4 | 5.0 | 28.7 | 19.3 | 1.50x |
+
+**Compile throughput scales to width 8 and then stops, and goes backwards at
+width 12** -- which is the pool size, so the two probes agree on where the corner
+is. **The PCH advantage survives parallelism**: it holds 1.36-1.50x at every
+width, so the section 16 result is a compile-stage result that does not evaporate
+when the machine is busy. Do not restate it as a submission-latency ratio.
+
+One number here resists interpretation and is recorded that way. Container CPU
+per compile rises from 162 ms to 370-419 ms (PCH) and from 240 ms to 520-625 ms
+(no PCH) -- 2.3-2.6x -- once width exceeds the 12 cores. On a shared machine,
+CPU per compile under contention is not a constant, and this probe cannot
+separate real contention from the host load behind it. The wall column is the
+one to use.
+
+### The noise floor, and how to re-run one rung
+
+The same code, the same payload shape and the same container were run again on a
+quieter machine, and the saturated rung moved by more than the effect of any
+change in this report:
+
+| c=32 | Committed ladder | Fresh re-run | Ratio |
+| --- | --- | --- | --- |
+| driver wall | 104.3 s | 50.67 s | **2.06x** |
+| throughput | 1.92 req/s | 3.95 req/s | 2.06x |
+| container CPU per submission | 2 106 ms | 514 ms | **4.1x** |
+| `execution_mean` | 5 923 ms | 2 922 ms | 2.03x |
+| `queue_wait_mean` | 5 828 ms | 2 898 ms | 2.01x |
+
+The c=1 rung moves the other way and less: wall 13.1 s to 19.35 s (1.48x slower)
+while its CPU per request only goes 263 ms to 301 ms (1.14x). That is the
+cleanest statement of the noise available -- **per-request cost is stable, wall
+time is not.**
+
+The committed sweep itself records the cause. The Mac's load average, read
+before each rung, runs **5.38, 7.82, 6.84, 7.08, 9.64, 13.70, 17.32, 17.70,
+16.12, 28.86** and 19.42 at the closing rung: the ladder was taken on a host
+that was already busy and got busier, which is also why its opening and closing
+rungs at the same concurrency differ by 6.3x (7.17 vs 1.14 req/s). The re-run was
+taken at load 3.97 (1 min) and 5.48 (15 min).
+
+**Consequence, and it is a constraint on how this report may be read: every
+absolute throughput and `cpu_ms_per_submission` in the saturated stage is
+host-noise-dominated and must not be quoted as a property of the system.** What
+reproduced exactly is the structure -- 12 workers, 24 isolate slots, 37 Postgres
+connections, and the law above -- and structure is what a decision should be
+sized on.
+
+Re-running one rung needs no scratch script, because the committed harness
+already takes both the level and the tag as arguments:
+
+```
+python3 benchmarks/benchmark_saturation.py --label drift --levels 32 --total 200 \
+    --sweeps cold --nonce-base <a tag no earlier run used>
+```
+
+Compare `throughput_req_per_s` and `worker.cpu_ms_per_submission` against the
+table above. **"Cold" only means cold with an unused tag**: replaying a saved
+`workload_cold_*.json` measures the compilation cache instead, and that mistake
+looks like a 20x speedup.
+
+### Three instrument corrections
+
+**`resque_processing_max` is not a concurrency count, and section 15's ladder
+columns should not be read as one.** A fresh concurrency-1 run of 12 requests,
+sampled 25 times at 0.4 s with the harness's own `ps -e -o comm=,args=` and the
+same two regexes, reads:
+
+```
+processing=0 waiting=12   processing=1 waiting=11   processing=2 waiting=10
+processing=3 waiting=9    processing=4 waiting=8  <- peak on a c=1 run
+processing=3 waiting=9    ...
+```
+
+Concurrency 1 cannot have four submissions in flight, so the field is counting
+something other than submissions. `processing + waiting` reads 12 in every tick,
+which is the pool, and the committed records agree: the means sum to 12.0 at
+every rung. The set of processes carrying a `Processing` title also rotates
+between ticks (P63, then P61, then P64, then P65) while `Waiting` falls by the
+same amount; the worker map underneath is stable -- PID 55 through 66, twelve
+processes, all PPID 28, with `resque-2.6.0: Waiting for 1.13.1` at rest, and
+`judge0-src/config/initializers/resque.rb:16` sets `FORK_PER_JOB = "false"`.
+The committed c=1 record's `resque_processing_max` is 3.81 mean / 6 max over 63
+ticks, and the saturated rungs read 11.4 of 12 with a max of 13 -- a thirteenth
+process, which is what a count of titles rather than a count of workers looks
+like. **What was measured is that the field counts processes whose proctitle says
+`Processing`; why the extra ones carry that title was not proven and is not
+guessed at here. Use `isolate_procs_max` (24) and `redis_workers` (12) for pool
+readings; both are unambiguous.**
+
+**The queue the sampler watched did not exist, and the queue that does exist is
+named after the version.** `SMEMBERS resque:queues` returns `{1.13.1}`: Resque
+deletes `resque:queue:<name>` when it drains, so `LLEN resque:queue:default`
+never existed and an instrument watching it reads zero forever and looks calm.
+`load-config:39` sets `QUEUE=${JUDGE0_VERSION}`, which is where the version
+string comes from. Fixed in `a8b8d61`; `checks/check_saturation_sampler.py`
+reports 11 ok with rc=0, its negative test confirms it fails when the wiring is
+broken, and `preflight()` at `benchmark_saturation.py:781` prints the recovery
+command rather than leaving a silent zero.
+
+**The per-PID split cannot see the sandbox, and its coverage is the bound.**
+`isolate.bin` (67 PIDs seen at c=1, 498 at c=32) and `a.out` read ~0 ms because
+they are short-lived and a sample is taken after they exit; at c=32 the effective
+tick was ~100 ms rather than the 20 ms requested. **Do not quote an isolate CPU
+figure from this data.** The 76% and 81% coverage rows are the honest form of the
+measurement: the sampler accounts for three quarters to four fifths of the
+window, and the remainder is largely the short-lived processes it never caught.
+
+### What would settle what is left
+
+The remaining question is narrow and can be stated exactly: **a submission's
+execution window is 2 922 ms at 12-way concurrency while its own CPU is 394 ms,
+and 609 ms while its CPU is 268 ms at concurrency 1.** The window inflates 4.8x
+while the CPU inflates 1.3x, so most of the saturated stage is time that is not
+computing, on a pool that is not CPU-bound. Two candidates survive everything
+above -- the host descheduling the container, which cannot be resolved from
+inside a Docker Desktop VM, and something in the compile pathway that blocks
+rather than burns CPU.
+
+The instrument that separates them is **per-stage counters inside the worker**:
+compile idle/total, exec idle/total, queue wait, per request. A `perf`-class
+profile of a single submission, taken stage by stage, would answer it too. Note
+what the instrument response is *not*: it is not a larger pool. Raising
+`COUNT` moves the knee from 12 to somewhere else without explaining this one,
+which is why priority 15's slot scheduler is worth building only after the
+counter exists to tell it what to schedule against.

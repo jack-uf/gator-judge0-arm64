@@ -29,9 +29,15 @@ ruby checks/check_base64_service.rb
 ruby checks/check_wait_budget.rb
 sh   checks/check_isolate_wrapper.sh
 ruby checks/check_language_seed.rb      # 11 languages seeded, and they match the image
+ruby checks/check_pch.rb                # the precompiled-header gate, against real files
+docker exec -i -u root native_judge0-worker-1 sh -s < checks/check_pch.sh
+                                        # ...and the same gate through a real Isolate compile
 ```
 
-All seven pass on the current HEAD.
+All nine pass on the current HEAD. `check_pch.sh` runs inside the worker
+container -- it needs the image's own header and `isolate` -- and takes the
+first free box out of 990-999, so it fails with `no free Isolate box` if a
+submission is running at the same moment.
 
 ## 2. System under test
 
@@ -40,7 +46,7 @@ All seven pass on the current HEAD.
 | Host | Apple Silicon (ARM64), Docker Desktop |
 | Docker VM memory | 7.652 GiB |
 | Judge0 API | `http://localhost:2358`, docker-compose maps `2358:2358` |
-| Language under test | id 54, C++ (GCC 9.2.0), `source_file: main.cpp` |
+| Language under test | id 54, seeded as `C++ (GCC 9.2.0)`, `source_file: main.cpp`. The language *name* is inherited from the seed and the compiler is not: `/usr/local/gcc-9.2.0/bin/g++` is a symlink to `/usr/bin/g++`, which is **g++ 11.4.0** for `aarch64-linux-gnu`. Every timing in this report is 11.4.0. |
 | Server mode | `wait=true` (synchronous) -- the worst case, not the typical path |
 | Worker pool | `COUNT` (= `nproc`) Resque workers, `FORK_PER_JOB=false` |
 | Worker image | `judge0:arm64-native`. Since section 14 it is C++-only (806 MB on disk) and serves 11 language ids; the runs in sections 6-8 were taken on the image before that change. |
@@ -620,12 +626,16 @@ The `runtime_error` crash path was a cold-cache artifact with no defect behind
 it (section 9 caveat 2), and the concurrency-10 stall was an undersampled sweep
 (caveat 3). What actually remains:
 
-1. **Cold compiles cost about 240 ms** and are now the largest single cost on a
-   cache miss. A tiny C++ program takes 247 / 289 / 190 ms to compile and link
-   inside the worker, of which roughly 45 ms is the link. The compilation cache
-   hides this whenever the same source is submitted again -- Gator++'s common
-   case -- so its real frequency is "how often a student submits something new".
-   Section 16 proposes the fix and its measured ceiling.
+1. **Cold compiles, reduced but not gone.** A tiny C++ program used to take
+   ~240 ms to compile and link, of which roughly 45 ms is the link; with the
+   precompiled header in place the compile is 44 ms on the smallest shape and
+   150-205 ms on the realistic ones (section 16). The compilation cache still
+   hides the whole of it whenever the same source is submitted again --
+   Gator++'s common case -- so its real frequency is "how often a student
+   submits something new", and that frequency is now the open question rather
+   than the compile time. Re-parsing is no longer the largest single cost on
+   the submission path; the fixed per-submission overhead is, and that is what
+   priorities 8, 9 and P2 in the brief are about.
 2. **Compile and exec still share one worker pool.** A compile-heavy burst and a
    run-heavy burst contend for the same slots, and a compile is ~5x the cost of
    a cache-hit run.
@@ -643,7 +653,9 @@ it (section 9 caveat 2), and the concurrency-10 stall was an undersampled sweep
    and a broken promise the moment someone enables it. Either it goes, or it
    gets built for the platform -- this is priority 18's concrete item.
 
-Not done from the brief, and why:
+Where each brief priority stands. The rows marked **Done** are the ones the
+brief's numbering called for by name; the rest are recorded with the reason they
+have not been started, so that "not done" is a decision rather than an omission.
 
 | Priority | Status |
 | --- | --- |
@@ -653,67 +665,308 @@ Not done from the brief, and why:
 | 15 (compile/exec slot scheduler) | Not started -- still bottleneck 2. |
 | 17 (Rust execution plane) | Long-term, not started. |
 | 18 (ARM64-native validation) | Not started. Concrete item: the x86-64 `bin/telemetry` above. |
+| P1 (precompiled headers) | **Done** -- section 16: 2.455x on the smallest C++ shape and 1.29-1.40x on realistic ones, CPU falling in proportion to wall, no measurable memory cost. |
 | 10 (hot/cold status split), 11 (remainder), 13 (SSE remainder), 19 (retention) | Not started. |
 
-## 16. Recommended next optimization
+## 16. Precompiled headers
 
-**Precompile the C++ headers the product actually uses, and expose the result
-read-only inside the sandbox.** A cold compile is ~240 ms, the only remaining
-cost of that size on the submission path (bottleneck 1), and the measured fix
-takes it to ~85 ms -- about 2.8x. Measured inside the worker container, g++
-11.4.0, ARM64. These are g++'s own times, not end-to-end submission latency;
-the end-to-end cold numbers are in section 9 caveat 1:
+**Status: shipped and measured.** `cc32d7d` in `judge0-src/` adds the gate and
+the compiler flag; `0c390c3` at the fork root builds the header into the image
+and adds the two container checks. This section replaces the proposal that used
+to stand here, and keeps the reasoning that produced the design.
 
-| Configuration | Time |
+### What the probe established, and one thing it got wrong
+
+A cold compile is the only remaining cost of that size on the submission path
+(section 15, bottleneck 1). The optimisation is to precompile the header that
+costs the most to parse and stop re-parsing it for every submission. The probe
+that justified it, `benchmarks/pch_probe.sh`, ran on g++ 11.4.0 inside the
+container:
+
+| Configuration | Probe time |
 | --- | --- |
 | `-O0 -pipe`, full compile and link | 247 / 289 / 190 ms (~240 ms) |
 | `-O0 -c`, compile only | 185 / 139 / 163 ms (~160 ms) |
 | link only | 50 / 43 / 47 ms (~45 ms) |
 | `-Og`, full compile and link | 340 / 226 / 209 ms -- **worse than `-O0`** |
 | `<iostream>` PCH, one-time build | 477 ms |
-| full compile and link with the `<iostream>` PCH | 76 / 83 / 93 ms (**~85 ms**) |
+| full compile and link with the `<iostream>` PCH | 76 / 83 / 93 ms (~85 ms) |
 | `<bits/stdc++.h>` PCH, one-time build | 6,618 ms, 116 MB |
 
-Three decisions fall out of that table before any code is written:
+**Every timing in that table was taken with `-H` on the compile command, and
+`-H` is not free.** It makes GCC print every header it opens, which is why the
+probe used it -- GCC marks a precompiled header it consumed with `!` -- but it
+costs more the more headers there are to print. Measured on its own later, `-H`
+more than doubles the compile it is attached to: 121 ms without it, 258 ms with
+it, same source, same flags. So the probe's **absolute times are probe times,
+not production compile times**, and they are not comparable to the paired
+numbers further down this section. Its *shape* is what the design used, and the
+shape held. Its oracle is a fact about which file GCC read rather than a timing,
+so that part is unaffected.
 
-- **Keep `-O0`.** That is the measured answer to the brief's `-O0` vs `-Og`
-  question: at this program size `-Og` averages 258 ms against `-O0`'s 242 ms
-  and peaks at 340 ms, so it costs more to compile while buying optimisation for
-  a program that runs for microseconds. This workload is judged on feedback
+Three decisions came out of it and all three survived:
+
+- **Keep `-O0`.** At this program size `-Og` averages 258 ms against `-O0`'s
+  242 ms and peaks at 340 ms: it costs more to compile while buying optimisation
+  for a program that runs for microseconds. This workload is judged on feedback
   latency.
 - **`<bits/stdc++.h>` is a trap here.** 116 MB and 6.6 s to build, for a header
-  the C++ path does not need. `<iostream>`-class headers, at 26 MB, are the
-  target.
+  the C++ path does not need. `<iostream>`, at 26 MB, is the target.
 - **Linker speedups are not available.** `lld` is not installed in this image,
-  so any `fuse-ld=lld` timing is a failed compile rather than a fast one. Do not
-  cite it.
+  so any `fuse-ld=lld` timing would be a failed compile rather than a fast one.
 
-The open decision is exposure, not speed. A 26 MB header cannot be copied into
-the box per submission -- the copy would cost more than the 160 ms it saves. It
-has to be built once in `Dockerfile.arm64` and mounted read-only inside the
-sandbox next to the existing `-d /etc:noexec` pattern, and doing that must not
-weaken isolation: compiler input has no business being writable, and nothing
-user-supplied should be able to reach the mount.
+### What was built
 
-Its ceiling is bounded and the bound belongs in the proposal: a PCH only helps a
-cache *miss*, and the compilation cache already serves Gator++'s common case of
-a repeated source. Measure how often a miss actually happens before building it.
+Three pieces, in the order they take effect.
+
+**1. The header, built into the image** (`Dockerfile.arm64`). The image compiles
+its own `/usr/include/c++/11/iostream` with `g++ -x c++-header` into
+`/usr/local/pch/c++/iostream.gch` -- 25,962,452 bytes, root-owned `0644` -- and
+writes `pch.sha256` beside it:
+
+```
+50479ac05a5cda301555edd09e45e92ac9f5d90da1a50facd6debf3a57909540  iostream.gch
+```
+
+It is built in the **last** image layer on purpose. A header built in an earlier
+layer against a different toolchain layer produced a different digest; the file
+that ships has to be the one the shipped compiler accepts, and the digest is how
+the worker knows it is.
+
+**2. The gate** (`judge0-src/app/services/pch.rb`). The worker offers the
+include path only after every entry in `pch.sha256` has been re-hashed and
+matched against the file it names. A missing manifest, an empty one, a short
+read, an unreadable file or a digest mismatch all answer "no PCH" and the
+compile proceeds exactly as it did before. The result is memoised per process,
+which is why the two supported ways to change it are a rebuild or a worker
+restart, and why disabling it in a hurry means deleting the manifest rather than
+replacing the header.
+
+**3. The flag** (`judge0-src/app/jobs/isolate_job.rb`). `-I/usr/local/pch/c++`
+is appended to the C++ compile command string only, and before `ExecPlan.parse`
+runs, so `ExecPlan` remains the single parser for everything the sandbox will
+execute and its round-trip check still covers the whole command.
+
+### Why a damaged PCH cannot break a submission
+
+This is the only real risk in the change. GCC treats a truncated `.gch` as a
+**hard error** (`rc=1`), and the worker would report that to the student as
+though their program were wrong. That is why the check happens *before* the flag
+is passed rather than after a failed attempt: there is no path where a bad
+header reaches a student's compile.
+
+Flag mismatches do not need the gate. GCC silently ignores a PCH built with a
+different `-O` level, standard or feature flags and re-parses the headers the
+ordinary way, which `check_pch.sh` exercises directly with `-O2`,
+`-std=c++11` and a PCH built for the wrong language. Only a *damaged file* is
+dangerous, and only the digest check catches it.
+
+`checks/check_pch.rb` tests the gate against real files in temporary
+directories, including a truncated header and a manifest with a forged digest.
+`checks/check_pch.sh` proves the same thing through a real Isolate compile in
+the container, and additionally that the shipped PCH is the one the manifest
+claims and that the binary it produces is ARM64. Recovery from a suspect PCH is
+`docker compose up -d --build worker`.
+
+### The effect on a compile
+
+The obvious way to measure this -- a block with the PCH, then a block without --
+does not work on this machine. Two identical API-level passes taken back to back
+came out up to 2.4x apart on a shape a precompiled header *cannot* affect (the
+evidence is under "End-to-end" below). The host drifts by more than the effect.
+
+`benchmarks/pch_paired.sh` therefore alternates the two conditions **run by
+run** inside one Isolate box, with the compiler, flags, limits and PATH the
+worker uses, and reports the median of the per-run ratios. Each with-PCH compile
+is paired with its immediate without-PCH neighbour, so a slow minute lands in
+both halves of every pair instead of on one block. `-H` is passed only in a
+separate oracle pass per case and condition, never on a timed run, for the
+reason above.
+
+The fifth case is the control: a program with no includes at all, which no
+precompiled header can help, run through the identical machinery. Its ratio is
+the floor of what the method can resolve. `benchmark_pch_paired.py` refuses to
+report a run whose oracle contradicts it or whose control moves outside
+0.90-1.10x.
+
+30 timed compiles per case per condition, `benchmarks/results_pch_paired.json`,
+`-O0`, in-box wall and whole-container CPU:
+
+| Case | Wall without | Wall with | Wall ratio | CPU without | CPU with | CPU ratio |
+| --- | --- | --- | --- | --- | --- | --- |
+| `minimal_iostream` | 108.0 ms | 44.0 ms | **2.455x** | 111.0 ms | 46.0 ms | 2.407x |
+| `gator_student` | 209.0 ms | 149.5 ms | 1.401x | 216.0 ms | 156.0 ms | 1.385x |
+| `template_heavy` | 267.0 ms | 204.0 ms | 1.302x | 281.5 ms | 218.0 ms | 1.291x |
+| `several_headers` | 251.0 ms | 195.0 ms | 1.287x | 258.0 ms | 201.0 ms | 1.279x |
+| `no_include` (control) | 18.0 ms | 18.0 ms | 1.000x | 20.0 ms | 19.5 ms | 1.000x |
+
+The same measurement at 20 repetitions (`results_pch_paired_reps20.json`) gives
+2.414 / 1.402 / 1.299 / 1.279 / 1.000 by wall and 2.372 / 1.377 / 1.285 / 1.267
+/ 1.000 by CPU -- the two runs agree within 1.7% at every shape, and the control
+is exactly 1.000x in both.
+
+So: **2.455x on the smallest program a student can write, and 1.29-1.40x on
+realistic ones.** The `2.8x` figure that used to stand in this section is not
+reproduced and should not be quoted. Two things account for the difference and
+both are corrections rather than regressions: the old figure came from probe
+runs carrying `-H`, and the honest comparison alternates the conditions instead
+of comparing two blocks on a host that drifts.
+
+Every included shape consumed the PCH in the with-PCH condition and the plain
+header in the without-PCH condition, verified by the oracle pass, and every
+compile exited 0. The control shape costs nothing measurable: 18.0 ms either
+way.
+
+### Does CPU fall in proportion to wall time?
+
+This is the brief's explicit question, so here it is as a ratio of ratios.
+`cpu_ms` is the whole worker container's CPU over the run (user + system, from
+the cgroup), so it includes Isolate's setup and the driver's own forks -- the
+CPU a VPS actually spends, not the compiler's internal figure.
+
+| Case | Wall ratio | CPU ratio | CPU as a share of the wall saving |
+| --- | --- | --- | --- |
+| `minimal_iostream` | 2.455x | 2.407x | 98.1% |
+| `gator_student` | 1.401x | 1.385x | 98.9% |
+| `template_heavy` | 1.302x | 1.291x | 99.2% |
+| `several_headers` | 1.287x | 1.279x | 99.4% |
+
+**Yes -- CPU falls in proportion to wall time, to within 2%, and the residual
+leans the same way in all four cases: CPU falls very slightly less than wall.**
+That is the expected direction. The PCH removes parsing work, which is CPU work,
+so the two should track almost exactly; what does not shrink is the fixed cost
+around the compile -- Isolate's setup, the process spawn, the filesystem work --
+which is a larger share of the shorter compile. In millisecond terms the saving
+is 64 ms and 65 ms of wall and CPU on `minimal_iostream`, and 56 ms and 57 ms on
+`several_headers`: the two move together almost ms for ms.
+
+An optimisation that cut wall time by waiting on I/O would show CPU falling much
+*less* than wall. This one does not, which is the evidence that it is removing
+real work rather than reordering it.
+
+### Peak memory
+
+The 26 MB header is a concern worth measuring, because a compile that maps it
+must not multiply that by the number of concurrent compiles. Sampled from the
+container's `memory.current` while each shape's compiles ran
+(`benchmarks/results_pch_pch_on_b.json`):
+
+| State | Worker container memory |
+| --- | --- |
+| Idle, freshly restarted | 835.1 MiB |
+| Peak with the PCH | 1,099.3 MiB (+264 MiB) |
+| Peak without the PCH | 1,123.2 MiB (+288 MiB) |
+
+The PCH adds **nothing measurable** to peak memory. The file is mapped
+read-only, so its pages are shared by every concurrent compile rather than
+copied per submission. These are the worker container's cgroup readings and are
+not comparable to section 10's RSS figures, which measure the whole stack a
+different way; the +264 MiB above idle is compile working set, not the header.
+
+### End-to-end latency, and why this host cannot resolve it
+
+The honest result here is a **failed measurement**, and it is worth recording so
+that nobody repeats it or quotes a number out of it. Three full API-level passes
+were taken, each on the same five shapes with cold sources, with a restart
+between them: with the PCH, without it, and with it again. The third pass is a
+sentinel: it repeats the first condition, so the gap between the two tells you
+what the host did on its own.
+
+| Shape | PCH on (pass 1) | PCH off | PCH on (pass 2) |
+| --- | --- | --- | --- |
+| `minimal_iostream` | 306.9 ms | 250.1 ms | 206.8 ms |
+| `gator_student` | 446.2 ms | 325.6 ms | 312.9 ms |
+| `template_heavy` | 548.2 ms | 427.5 ms | 449.2 ms |
+| `several_headers` | 949.9 ms | 424.3 ms | 391.3 ms |
+| `no_include` (control) | 351.0 ms | 170.5 ms | 200.2 ms |
+| cold throughput, c=25 | 5.96 req/s | 9.35 req/s | 10.15 req/s |
+
+The two passes with the PCH installed are the *same condition*, and the control
+shape cannot be affected by a precompiled header at all. They came out 351.0 ms
+and 200.2 ms apart -- a 1.75x difference on a shape with no includes -- and
+`several_headers` is 2.4x apart. **The method's own error is larger than the
+effect being measured**, so no end-to-end latency claim is made in either
+direction, and the p50/p95/p99 columns of the summary table below stay empty
+for this row. The confounding variable is visible in the same data: pass 1 ran
+on a worker that had been up for twenty minutes and reported 1,102 MiB idle,
+while passes 2 and 3 ran on freshly restarted workers at 835 MiB. The host and
+the container's own accumulated state both moved.
+
+What can be said without measuring it twice is a composition argument, and it is
+the reason this does not matter as much as it looks. Everything outside the
+compile -- the API, Redis, Resque, Isolate setup, the run phase -- is untouched
+by the change, so the end-to-end effect is bounded above and below by the
+compile effect already measured: on `minimal_iostream` the PCH removes 64 ms of
+wall from a submission whose end-to-end p50 here is roughly 200 ms, so the
+end-to-end improvement cannot exceed about 1.3x on that shape, and it is smaller
+for every other shape because the compile is a smaller share of it. **The 2.455x
+is a compile-stage result and must not be restated as a submission latency
+result.**
+
+### Where this leaves the numbers
+
+The table the brief asks for, in the brief's shape. Rows are cumulative states
+of the system, not increments, and a cell is filled only where a measurement
+supports it.
+
+| Version | p50 | p95 | p99 | CPU/submission | req/s | RSS |
+| --- | --- | --- | --- | --- | --- | --- |
+| current verified (section 9 caveat 3) | 0.3096 s | 0.4356 s | -- | -- | **76.59 @ c=25** | 1.00 GiB |
+| + production PCH | not resolvable here | not resolvable here | -- | compile CPU down 1.29-2.41x | 76.59 unchanged (no compile on a hit) | +0 MiB measured |
+| + scheduler changes | not built | | | | | |
+| + batch optimization | not built | | | | | |
+| + other measured improvements | not built | | | | | |
+
+Three notes on that row, because each is easy to read wrongly:
+
+1. **The 76.59 req/s does not move.** That figure is compilation-cache-hit
+   throughput -- the same source re-submitted -- and a PCH cannot speed up a
+   submission that does not compile. It is unaffected, not improved.
+2. **Cold-compile throughput is a different regime and is reported separately.**
+   At concurrency 25 with 200 *distinct* sources it was 9.35 req/s without the
+   PCH and 10.15 with it, but the control shape moved 1.75x between the passes
+   those numbers came from, so this is not a resolved improvement either. It is
+   not a regression, and it is the number to re-measure on a quiet machine.
+3. **`CPU/submission` is two different quantities.** The section's headline
+   saving is on the compile; the compiled program's own runtime is unchanged,
+   because a precompiled header changes what the compiler has already parsed,
+   not the code it emits.
+
+The ceiling stated in the original proposal still holds and is now measurable: a
+PCH only helps a cache *miss*, and the compilation cache already serves
+Gator++'s common case of a repeated source. So the number that decides whether
+the 26 MB and the four commits were worth it is not in this section at all -- it
+is **how often a cache miss actually happens in production**, which the brief
+asks for separately as priority P6. Until that is measured, the defensible
+statement is the narrow one: a compile that misses the cache is 1.29-2.46x
+cheaper for the same output, and a compile that hits it is unchanged.
 
 ---
 
 ### Version-control caveat
 
-`judge0-src/` is a git repository and holds all eight commits. The fork files
-that live beside it -- `Dockerfile.arm64`, `isolate-wrapper.sh`,
-`docker-compose.yml`, `judge0.conf`, `checks/`, `benchmarks/`, and this report --
-are **not** under version control; the fork root is not a repository. Roughly
-half the project therefore has no history and no backup. Running `git init` at
-the fork root is the obvious fix and has not been done, because it changes the
-layout of the project.
+**This gap is closed**, as of `1c301ec`. There are now two repositories, and
+each one owns half of the project:
 
-That gap now has a measured cost attached to it, which is worth recording: the
+| Repository | Holds | Commits |
+| --- | --- | --- |
+| `judge0-src/` | the Rails application | the eight application commits, ending `28ce721`, then `cc32d7d` |
+| the fork root | `Dockerfile.arm64`, `isolate-wrapper.sh`, `docker-compose.yml`, `judge0.conf`, `checks/`, `benchmarks/`, and this report | `1c301ec`, `0c390c3` |
+
+The fork root tracks 28 files: the compose stack, the sandbox wrapper, the image
+definition, the nine checks, the benchmark scripts that produced every number in
+this report, and this document. Both repositories are on `main`.
+
+Why this mattered is worth keeping on the record even though it is fixed. The
 previous `Dockerfile.arm64` -- the one with the five extra toolchains -- exists
 in no repository, so section 14 can report the current image's 69 s rebuild but
-has no before figure to divide by. A one-file change to an untracked Dockerfile
-is also the reason `db/seeds.rb` had to be committed on its own in `28ce721`
-while the image it depends on was not.
+has no before figure to divide by. The same gap is why `db/seeds.rb` had to be
+committed on its own in `28ce721` while the image it depends on was not. And it
+is the direct reason the `2.8x` that used to head section 16 could not be
+re-derived: the probe script that produced it had been edited since, and with no
+history there was nothing to say what it had actually run when.
+
+Three things are deliberately outside both repositories: the Docker image and
+the compilation cache are build and runtime artifacts, and the Postgres and
+Redis volumes are data. Both reproduce from the two repositories plus
+`docker compose up -d --build`.

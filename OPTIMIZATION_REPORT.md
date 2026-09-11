@@ -19,7 +19,7 @@ python3 benchmarks/benchmark_suite.py --label <label>
 ```
 
 Results land in `benchmarks/results_<label>.json`. The correctness checks are
-standalone Ruby and need no gems:
+standalone and need no gems:
 
 ```sh
 ruby checks/check_exec_plan.rb          # 142 language command definitions swept
@@ -30,14 +30,18 @@ ruby checks/check_wait_budget.rb
 sh   checks/check_isolate_wrapper.sh
 ruby checks/check_language_seed.rb      # 11 languages seeded, and they match the image
 ruby checks/check_pch.rb                # the precompiled-header gate, against real files
+python3 checks/check_saturation_sampler.py  # the sampler reads the queue that exists
+python3 checks/check_pool_structure.py      # section 17's pool readings, re-derived
 docker exec -i -u root native_judge0-worker-1 sh -s < checks/check_pch.sh
                                         # ...and the same gate through a real Isolate compile
 ```
 
-All nine pass on the current HEAD. `check_pch.sh` runs inside the worker
-container -- it needs the image's own header and `isolate` -- and takes the
-first free box out of 990-999, so it fails with `no free Isolate box` if a
-submission is running at the same moment.
+All eleven pass on the current HEAD. The two Python checks need no containers:
+the sampler check puts a stub `redis-cli` on PATH, and the pool check reads the
+committed ladder record. `check_pch.sh` runs inside the worker container -- it
+needs the image's own header and `isolate` -- and takes the first free box out
+of 990-999, so it fails with `no free Isolate box` if a submission is running
+at the same moment.
 
 ## 2. System under test
 
@@ -969,7 +973,7 @@ each one owns half of the project:
 | the fork root | `Dockerfile.arm64`, `isolate-wrapper.sh`, `docker-compose.yml`, `judge0.conf`, `checks/`, `benchmarks/`, and this report | `1c301ec`, `0c390c3` |
 
 The fork root tracks 28 files: the compose stack, the sandbox wrapper, the image
-definition, the nine checks, the benchmark scripts that produced every number in
+definition, the eleven checks, the benchmark scripts that produced every number in
 this report, and this document. Both repositories are on `main`.
 
 Why this mattered is worth keeping on the record even though it is fixed. The
@@ -1008,10 +1012,15 @@ workers, and the same file sets `RAILS_SERVER_PROCESSES=2` and
 `RAILS_MAX_THREADS=$(nproc)` (`:23-24`), which `judge0-src/config/puma.rb:1-4`
 turns into the API server. Inside the worker container `nproc` is 12, so the
 stack is **12 workers against 2 x 12 = 24 API request slots**, confirmed live
-again this session. Two independent samplers agree at every rung of the ladder:
-Redis reports `redis_workers = 12` flat, and the sandbox sampler pins
-`isolate_procs_max` at **24 = 12 x 2** from concurrency 16 upward, which is the
-12 workers each holding one isolate process.
+again this session. Two independent samplers agree at every rung of the ladder.
+The redis sampler reports `redis_workers = 12` flat -- read the raw
+`samplers.redis.redis.redis_workers` field in the ladder records, not the
+flattened `sandbox.redis_workers`, which is null in that file because the
+harness read the group off the wrong container until `a8b8d61`. The sandbox
+sampler counts `isolate_procs_max` at exactly **2 x min(c, 12)**: 2, 4, 8 and
+16 at concurrency 1, 2, 4 and 8, then pinned at **24** from concurrency 16
+upward. Two isolate processes per in-flight submission, twelve submissions in
+flight -- the sandbox's own ceiling lands on the same 12.
 
 So at most `min(c, 12)` submissions execute at once, and the ladder is staged
 like this:
@@ -1224,10 +1233,12 @@ looks like a 20x speedup.
 
 ### Three instrument corrections
 
-**`resque_processing_max` is not a concurrency count, and section 15's ladder
-columns should not be read as one.** A fresh concurrency-1 run of 12 requests,
-sampled 25 times at 0.4 s with the harness's own `ps -e -o comm=,args=` and the
-same two regexes, reads:
+**`resque_processing_max` is not a concurrency count, and its name invites that
+misreading.** It is the harness's count of proctitles matching `Processing`
+(`sandbox.resque_processing_max` in `benchmarks/results_saturation_sat.json`);
+nothing in this section uses it as a pool depth. A fresh concurrency-1 run of 12
+requests, sampled 25 times at 0.4 s with the harness's own
+`ps -e -o comm=,args=` and the same two regexes, reads:
 
 ```
 processing=0 waiting=12   processing=1 waiting=11   processing=2 waiting=10
@@ -1237,8 +1248,11 @@ processing=3 waiting=9    ...
 
 Concurrency 1 cannot have four submissions in flight, so the field is counting
 something other than submissions. `processing + waiting` reads 12 in every tick,
-which is the pool, and the committed records agree: the means sum to 12.0 at
-every rung. The set of processes carrying a `Processing` title also rotates
+which is the pool, and the committed records agree: on the cold ladder the two
+means sum to 12.000-12.019 at every rung. (The `hit` records drift to 12.2,
+because those runs are short enough that the sampler only caught 24-64 ticks
+against the cold ladder's 390 and up. `checks/check_pool_structure.py` asserts
+the cold half.) The set of processes carrying a `Processing` title also rotates
 between ticks (P63, then P61, then P64, then P65) while `Waiting` falls by the
 same amount; the worker map underneath is stable -- PID 55 through 66, twelve
 processes, all PPID 28, with `resque-2.6.0: Waiting for 1.13.1` at rest, and
@@ -1255,6 +1269,9 @@ readings; both are unambiguous.**
 named after the version.** `SMEMBERS resque:queues` returns `{1.13.1}`: Resque
 deletes `resque:queue:<name>` when it drains, so `LLEN resque:queue:default`
 never existed and an instrument watching it reads zero forever and looks calm.
+The committed ladder is that zero, and it is worth seeing once: `queue_depth`
+reads a **max of 0.0 in all 22 records**, saturated rungs included, while the
+same sampler's `redis_workers` reads 12 in every one of them.
 `load-config:39` sets `QUEUE=${JUDGE0_VERSION}`, which is where the version
 string comes from. Fixed in `a8b8d61`; `checks/check_saturation_sampler.py`
 reports 11 ok with rc=0, its negative test confirms it fails when the wiring is

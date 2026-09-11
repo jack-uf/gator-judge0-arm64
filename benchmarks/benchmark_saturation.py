@@ -55,8 +55,10 @@ Honesty notes that matter when reading the output:
 * "Simultaneous compilers", "simultaneous executions" and "isolate invocations"
   are sampled at SAMPLE_INTERVAL_S, so they are sampled peaks and floors, not
   exact extremes. The samplers see process names, not sandbox ids: `ps` here
-  truncates the argument list before isolate's `-b <box>` appears, so the record
-  counts isolate processes instead of distinct boxes.
+  does return isolate's full argv -- the note above SAMPLER measures that -- but
+  `-b <box>` names a scratch directory rather than a submission, so a record
+  counts isolate processes (two per in-flight submission) instead of distinct
+  boxes, which is the same question asked in a unit that cannot drift.
 * `CONFIG RESETSTAT` runs on Redis at the start of every level, so the command
   counters and latency percentiles read after it describe that level alone.
   Nothing is reset in PostgreSQL: its figures are read twice and differenced.
@@ -184,14 +186,18 @@ SAMPLER = r"""
 # field after it, which is how this harness first mis-read the VM group.
 # Groups are joined by the shell printf at the bottom of the loop, which emits the
 # separator between them; the awk blocks add no leading or trailing separator.
-# `ps` is only trusted for what it cannot truncate: this image's procps-ng 3.3.17
-# shrinks the `args` column to the output width, and neither `-ww` nor `--width`
-# nor COLUMNS widens it (measured: 27 characters of args at three columns). A real
-# submission's `-b <box>` sits ~250 characters into isolate's argv, behind thirteen
-# `-E` flags, so it is never visible here -- the fields below come from `comm`,
-# which ps never truncates, or from an args prefix shorter than that window. There
-# is deliberately no box count and no per-process RSS sum: `boxes` cannot be
-# observed through ps, and summing per-process RSS counts shared pages once per
+# `comm` is what the process counts below read, and that is a choice rather than a
+# limit. Measured in this image with no tty, which is how the sampler runs:
+# `ps -e -o comm=,args=` returned a 345-character argv in full, `-ww` changed
+# nothing, and the column clipped to exactly COLUMNS when COLUMNS was set
+# (COLUMNS=200 -> 200 characters, 7 of 12 argv words). A tty is what narrows the
+# column, and it is where the 27-character figure that used to stand here came
+# from; the resque proctitles a sibling field matches are read in full for the same
+# reason. So isolate's `-b <box>` is readable -- it is just not the question. The
+# box id names the sandbox's scratch directory (`-M /dev/shm/judge0/26/metadata.txt`
+# for `-b 26`), while what a level needs to know is how many submissions the
+# sandbox was carrying at once, and that is a count of processes. There is
+# deliberately no per-process RSS sum: summing it counts shared pages once per
 # process (1404 MiB summed against 1206 MiB of memory.current on the same
 # processes), while the worker group reports the cgroup's exact memory.current.
 SAT_SAMPLER=1
@@ -255,7 +261,20 @@ while [ ! -e "$stop" ] && [ "$(date +%s)" -lt "$end" ]; do
   rf=""
   case "__MODE__" in
     redis)
-      q=$(redis-cli -a judge0 --no-auth-warning LLEN resque:queue:default 2>/dev/null)
+      # Depth is summed over the queues the `resque:queues` set names, never against
+      # a hard-coded key: Resque deletes `resque:queue:<name>` the moment that queue
+      # drains, so an LLEN against a name that is not in the set reads 0 for the
+      # whole run, saturation included. This stack's queue is named after
+      # JUDGE0_VERSION (`1.13.1`); `resque:queue:default` has never existed here. A
+      # drained queue that *is* in the set also answers 0, which is true rather than
+      # missing, and the workers read their queue name from the same env var.
+      # ponytail: one redis-cli per queue per tick (one queue here, ~8 spawns/s);
+      # batch into a single EVAL if a deployment ever runs many queues.
+      q=0
+      for qu in $(redis-cli -a judge0 --no-auth-warning SMEMBERS resque:queues 2>/dev/null); do
+        d=$(redis-cli -a judge0 --no-auth-warning LLEN "resque:queue:$qu" 2>/dev/null)
+        q=$(( q + ${d:-0} ))
+      done
       w=$(redis-cli -a judge0 --no-auth-warning SCARD resque:workers 2>/dev/null)
       b=$(redis-cli -a judge0 --no-auth-warning INFO clients 2>/dev/null | tr -d '\r' | awk -F: '/^blocked_clients/{print $2}')
       rf=" ${q:-0} ${w:-0} ${b:-0}"
@@ -524,13 +543,18 @@ def vm_metrics(sampler_summary, wall_s):
     }
 
 
-def sandbox_metrics(sampler_summary):
+def sandbox_metrics(worker_summary, redis_summary):
     """What the sandbox layer was doing, from process names alone -- see the `ps`
     note above SAMPLER for why there is no box count and no RSS field here.
     `isolate_procs_max` is the isolate invocations alive at once, two per in-flight
-    submission, so it is the concurrency the sandbox itself actually carried."""
-    ps = sampler_summary.get("ps", {})
-    redis = sampler_summary.get("redis", {})
+    submission, so it is the concurrency the sandbox itself actually carried.
+
+    Two summaries, because two containers produce them: only the worker image has
+    `ps` and only the redis container has `redis-cli`. Reading the redis fields off
+    the worker's summary is what left all three of them None in the 24 records that
+    preceded this signature."""
+    ps = worker_summary.get("ps", {})
+    redis = redis_summary.get("redis", {})
     return {
         "compilers_max": ps.get("compilers", {}).get("max"),
         "runs_max": ps.get("runs", {}).get("max"),
@@ -731,6 +755,47 @@ def stray_samplers(container):
     return int(sh(container, script).strip() or 0)
 
 
+def probe_redis_group(ticks=4):
+    """One tick of the redis sampler, parsed by the same code a level parses it with.
+
+    The redis group is the only group whose fields come from a lookup rather than
+    from /proc: `queue_depth` is a sum over the queue names in the `resque:queues`
+    set. That makes it the one group a naming or wiring mistake can zero out
+    silently, which is what happened to the first 24 records this harness produced
+    -- their `redis_queue_depth_max` was None, because the worker's summary was
+    passed to sandbox_metrics, and their `queue_depth` was a flat 0, because the
+    sampler polled a queue name that does not exist. Neither showed as an error.
+    This runs the real sampler against the real container before a ladder starts,
+    so the same mistakes fail here instead, and it is the only check that the redis
+    line's slots are aligned.
+    """
+    sampler = Sampler(CONTAINERS["redis"], "redis")
+    sampler.start()
+    time.sleep(SAMPLE_INTERVAL_S * ticks)
+    rows = sampler.stop()
+    if sampler.error:
+        raise SystemExit(f"the redis sampler did not run: {sampler.error}")
+    if not rows:
+        raise SystemExit(
+            "the redis sampler wrote no samples, so every level's redis fields would be "
+            "empty.\nRun one tick by hand:\n  docker exec -u root "
+            f"{CONTAINERS['redis']} redis-cli -a judge0 --no-auth-warning SMEMBERS resque:queues"
+        )
+    if rows[0]["_short"] or rows[0]["queue_depth"] is None:
+        raise SystemExit(
+            "the redis sampler's line is short for its groups, so its fields are read from the "
+            "wrong slots.\nCheck the separator between the cg and redis groups in SAMPLER, then "
+            f"run this again. First line parsed as {rows[0]}"
+        )
+    return {
+        "samples": len(rows),
+        "queues": redis_cli("SMEMBERS", "resque:queues").split(),
+        "queue_depth": rows[0]["queue_depth"],
+        "redis_workers": rows[0]["redis_workers"],
+        "blocked_clients": rows[0]["blocked_clients"],
+    }
+
+
 def preflight():
     checks = {}
     running = set(docker("ps", "--format", "{{.Names}}").stdout.split())
@@ -766,6 +831,7 @@ def preflight():
         row["extname"] for row in rows_of(psql(["select extname from pg_extension order by 1"]), ("extname",))
     ]
     checks["redis_latency_tracking"] = redis_info("latencystats") != {}
+    checks["redis_group"] = probe_redis_group()
     checks["idle_worker_cpu_ms_over_3s"] = round(assert_worker_is_clean(), 1)
     checks["sampler_cost"] = calibrate_sampler_cpu()
     checks["host"] = host_load()
@@ -1005,7 +1071,7 @@ def run_level(sweep, concurrency, total, tag, nonce, ruby):
             "idle_cpu_ms_over_3s_before": idle_cpu_ms,
         },
         "vm": vm_metrics(summaries["worker"], host_wall_s),
-        "sandbox": sandbox_metrics(summaries["worker"]),
+        "sandbox": sandbox_metrics(summaries["worker"], summaries["redis"]),
         "other_containers": {
             name: {"cpu_ms": round((counter_delta(summary.get("cg", {}), "cpu_usec") or 0) / 1000.0, 1)}
             for name, summary in summaries.items() if name != "worker"
@@ -1359,6 +1425,8 @@ def main():
     checks = preflight()
     print(
         f"preflight: {checks['gxx_version']} pch_engaged={checks['pch']['engaged']} "
+        f"resque_queues={checks['redis_group']['queues']} "
+        f"depth_now={checks['redis_group']['queue_depth']} "
         f"clock_ticks={checks['clock_ticks']} driver={checks['driver_ruby']} "
         f"sampler_cost={checks['sampler_cost']['cpu_ms']}ms over {checks['sampler_cost']['samples']} samples "
         f"idle_worker={checks['idle_worker_cpu_ms_over_3s']}ms/3s mac_load1={checks['host']['load1']}"

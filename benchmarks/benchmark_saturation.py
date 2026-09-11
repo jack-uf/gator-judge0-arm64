@@ -1076,7 +1076,7 @@ d=/tmp/judge0_sat_probe
 rm -rf "$d"; mkdir -p "$d"
 printf '%s' '__B64__' | base64 -d > "$d/base.cpp" || { echo 'SAT_PROBE base64 decode failed'; exit 1; }
 i=1
-while [ $i -le __N__ ]; do
+while [ $i -le __M__ ]; do
   { cat "$d/base.cpp"; printf '// par__TAG__ n=__N__ arm=__ARM__ i=%04d\n' "$i"; } > "$d/s$i.cpp"
   i=$((i + 1))
 done
@@ -1084,14 +1084,25 @@ ticks() { awk '{ sub(/^[^)]*\) /, ""); print $12 + $13 + $14 + $15 }' "/proc/$$/
 t0=$(date +%s.%N)
 before=$(ticks)
 pids=''
-i=1
-while [ $i -le __N__ ]; do
-  __GXX__ -O0 -pipe __INC__ "$d/s$i.cpp" -o "$d/s$i.out" >/dev/null 2>"$d/s$i.err" &
+# __M__ files over __N__ slots, so every level compiles the same number of files
+# and every slot compiles the same fraction of them.
+slot=1
+while [ $slot -le __N__ ]; do
+  (
+    f=0
+    j=$slot
+    while [ $j -le __M__ ]; do
+      __GXX__ -O0 -pipe __INC__ "$d/s$j.cpp" -o "$d/s$j.out" >/dev/null 2>"$d/s$j.err" || f=$((f + 1))
+      j=$((j + __N__))
+    done
+    echo "$f" > "$d/f$slot"
+  ) &
   pids="$pids $!"
-  i=$((i + 1))
+  slot=$((slot + 1))
 done
 failed=0
 for p in $pids; do wait "$p" || failed=$((failed + 1)); done
+for f in "$d"/f*; do failed=$((failed + $(cat "$f"))); done
 after=$(ticks)
 t1=$(date +%s.%N)
 rm -rf "$d"
@@ -1106,9 +1117,9 @@ def compiles_for_level(parallel, target):
     return max(parallel, ((target + parallel - 1) // parallel) * parallel)
 
 
-def compile_probe(parallel, arm, tag, ticks_per_s):
-    """One level of the probe: `parallel` concurrent compiles, `arm` deciding
-    whether the precompiled header is on the include path."""
+def compile_probe(parallel, compiles, arm, tag, ticks_per_s):
+    """One level of the probe: `compiles` files compiled `parallel` at a time,
+    `arm` deciding whether the precompiled header is on the include path."""
     script = (
         PROBE
         .replace("__B64__", base64.b64encode(PROBE_SOURCE.encode()).decode())
@@ -1117,6 +1128,7 @@ def compile_probe(parallel, arm, tag, ticks_per_s):
         .replace("__TAG__", str(tag))
         .replace("__ARM__", arm)
         .replace("__N__", str(parallel))
+        .replace("__M__", str(compiles))
     )
     out = sh(CONTAINER, script, timeout=900)
     for line in out.splitlines():
@@ -1143,18 +1155,18 @@ def compile_probe(parallel, arm, tag, ticks_per_s):
 
 def run_parallel_sweep(levels, reps, target, tag, ticks_per_s):
     """Every level, every arm, `reps` times over."""
-    if assert_worker_is_clean() > 0:
-        raise SystemExit(
-            "the worker container is not idle, so a compile probe would be measuring whatever "
-            "else is running in there.\nLook at `docker exec " + CONTAINER + " ps -e -o pid=,comm=,args=`."
-        )
+    # `assert_worker_is_clean` is the idle gate, and it is calibrated: the worker
+    # always burns some CPU (twelve Resque workers polling Redis, resque-scheduler,
+    # cron), measured at 91-211 ms per 3 s on an idle container.  Anything above
+    # 900 ms/3 s is a leftover sampler or a real submission and is refused there.
+    assert_worker_is_clean()
     records = []
     for rep in range(1, reps + 1):
         for parallel in levels:
             for arm in ("nopch", "pch"):
                 compiles = compiles_for_level(parallel, target)
                 cgroup_before = worker_cpu_usec()
-                probe = compile_probe(parallel, arm, tag, ticks_per_s)
+                probe = compile_probe(parallel, compiles, arm, tag, ticks_per_s)
                 cgroup_ms = (worker_cpu_usec() - cgroup_before) / 1000.0
                 record = {
                     "sweep": "parallel",

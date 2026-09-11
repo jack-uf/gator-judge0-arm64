@@ -1,0 +1,719 @@
+# Judge0 ARM64 / Gator++ Optimization Report
+
+This report documents what was slow in the ARM64 Judge0 fork that powers
+Gator++, what was changed, and what the measured results were. It is written to
+be readable by someone who did not sit through the development process.
+
+Every number below is measured on this machine by the checked-in benchmark
+suite. Nothing is extrapolated, and no percentage improvements are combined --
+the final section reports one measurement of the final system.
+
+---
+
+## 1. How to reproduce
+
+```sh
+cd /Users/jack/new_Project/native_judge0
+docker compose up -d --build          # rebuild so the image matches HEAD
+python3 benchmarks/benchmark_suite.py --label <label>
+```
+
+Results land in `benchmarks/results_<label>.json`. The correctness checks are
+standalone Ruby and need no gems:
+
+```sh
+ruby checks/check_exec_plan.rb          # 142 language command definitions swept
+ruby checks/check_compilation_cache.rb
+ruby checks/check_sandbox_argv.rb
+ruby checks/check_base64_service.rb
+ruby checks/check_wait_budget.rb
+sh   checks/check_isolate_wrapper.sh
+ruby checks/check_language_seed.rb      # 11 languages seeded, and they match the image
+```
+
+All seven pass on the current HEAD.
+
+## 2. System under test
+
+| Component | Value |
+| --- | --- |
+| Host | Apple Silicon (ARM64), Docker Desktop |
+| Docker VM memory | 7.652 GiB |
+| Judge0 API | `http://localhost:2358`, docker-compose maps `2358:2358` |
+| Language under test | id 54, C++ (GCC 9.2.0), `source_file: main.cpp` |
+| Server mode | `wait=true` (synchronous) -- the worst case, not the typical path |
+| Worker pool | `COUNT` (= `nproc`) Resque workers, `FORK_PER_JOB=false` |
+| Worker image | `judge0:arm64-native`. Since section 14 it is C++-only (806 MB on disk) and serves 11 language ids; the runs in sections 6-8 were taken on the image before that change. |
+
+The benchmark's concurrency sweep reuses a single `TINY_CPP` source for every
+request. Those throughput numbers are therefore **compilation-cache-hit**
+throughput -- re-submitting the same program, which is Gator++'s common case.
+They are not compile throughput.
+
+## 3. Bottlenecks found
+
+1. **A fixed ~30 s stall on a fraction of submissions.** In the baseline,
+   `timeout` (a workload whose own limits are `cpu_time_limit: 1.0`,
+   `wall_time_limit: 2.0`) had a p50 of **30.0056 s**, and almost every other
+   workload showed a p95 of ~30.00 s. The consistency of those values points at
+   a fixed timeout in the completion path, not at load.
+2. **The worker polled for completion** instead of being told. Two shell
+   invocations per submission (`compile`, `run`) plus a poll loop.
+3. **Every submission recompiled.** No compilation cache existed, so a repeated
+   submission paid a full `g++` compile.
+4. **The toolchain fingerprint was blind.** `CompilationCache.toolchain_fingerprint`
+   used `compile_cmd.to_s.split(" ").first`, which for any language definition
+   with a leading `VAR=value` (GOCACHE for Go, `LD_LIBRARY_PATH` for GCC, `PATH`
+   for Prolog) stat'd the *assignment*, not the compiler. Every entry for those
+   languages collapsed onto one constant `unknown:VAR=...` key.
+5. **Distinct bytes compared equal, so wrong answers could be graded Accepted.**
+   `Base64Service.clean_utf8` replaced every non-UTF-8 byte with `?`. The verdict
+   compares `Submission#expected_output` against a raw read of the sandbox
+   stdout, so printing `0xFE` and printing `0xFF` compared equal. Reproduced
+   under Ruby 2.6.10: `expected bytes=[63] actual bytes=[63]`,
+   `distinct bytes decode EQUAL: true`. This was the most serious defect found.
+6. **Arguments were re-split from strings.** The lifecycle calls interpolated
+   argv into a command string, so `extract_archive` produced `-m 512000` as a
+   single token -- the flag `-m` with an empty variable name.
+
+## 4. What was fixed
+
+Eight commits on `judge0-src` `master`, from the upstream base `9eba69f`:
+
+| Commit | Change |
+| --- | --- |
+| `c32bf4d` | Deliver `additional_files` to the sandbox again, and keep binary blobs binary |
+| `70c0fe6` | Exec submissions by argv instead of through two shells; stop polling for completion |
+| `26284fa` | Cache compile failures alongside successful binaries |
+| `02e38c7` | Run the sandbox lifecycle by argv too; stop re-splitting arguments |
+| `13e9e80` | Collapse the queued-state write into the `INSERT` |
+| `481510b` | Fingerprint the toolchain through the argv parser (fixes finding 4) |
+| `46b57fc` | Decode stored text as bytes instead of replacing invalid sequences (fixes finding 5) |
+| `28ce721` | Seed only the languages the ARM64 image can actually run (section 14) |
+
+Scope: 13 files, +1021 / -178 lines.
+
+```
+app/controllers/submissions_controller.rb   app/services/base64_service.rb
+app/helpers/isolate_runner.rb               app/services/compilation_cache.rb
+app/jobs/isolate_job.rb                     app/services/exec_plan.rb
+app/models/submission.rb                    app/services/judge0_redis.rb
+app/services/sandbox_command.rb             app/services/submission_show_payload.rb
+config/initializers/resque.rb               db/seeds.rb
+scripts/load-config
+```
+
+Honest scoping note on `02e38c7`: the mis-split `-m 512000` token was in the
+rlimit branch, which is selected by `enable_per_process_and_thread_memory_limit`.
+`judge0.conf` does not select it (the benchmark confirms both
+`enable_per_process_and_thread_*` flags are `false`), so that specific bug was
+latent. The real gain there is one fewer shell per lifecycle call, plus correct
+parsing if the flag is ever flipped.
+
+## 5. Architecture: before and after
+
+Before (per submission): the request enqueued a job, then **polled** the
+submission row for completion; completion ran `isolate ... compile` and
+`isolate ... run` as **two shell command strings** built by interpolation; every
+submission recompiled.
+
+After:
+
+- `ExecPlan.parse` turns each language's `compile_cmd` / `run_cmd` into an argv
+  vector once, and everything downstream consumes argv. No shell is involved in
+  the submission path.
+- The worker is notified of completion (`Judge0Redis`) instead of polling.
+- Resque reserves via blocking `BLPOP` (`ResqueBlockingWorker`, prepended in
+  `config/initializers/resque.rb`), `FORK_PER_JOB=false`.
+- `CompilationCache` stores the compiled binary -- and, since `26284fa`, the
+  failure -- under a content-addressed key.
+- `SandboxCommand` / `SubmissionShowPayload` keep argv construction and response
+  shaping in one place each.
+- The worker image carries only the toolchains a seeded language points at, and
+  the seed creates only those languages (section 14). The API service no longer
+  runs privileged; the worker keeps the grant Isolate needs.
+
+`app/jobs/isolate_job.rb` now contains **zero backtick shell execution**.
+
+## 6. Baseline results
+
+`benchmarks/results_baseline.json` -- the pre-optimization state. p95 and p99
+are the maximum observed value, because `n=5` for most workloads: at that sample
+size the 95th percentile *is* the largest sample, so treat the baseline's
+`30.00xx` entries as "the worst of five", not as a fitted tail.
+
+## 7. Per-optimization results
+
+`tiny_cpp`, `n=5`, `wait=true`. The `submissions/sec` column is throughput at
+`concurrency=10` for every stage so the column is comparable across rows.
+`RSS` was only sampled for the baseline and the final combined state.
+`CPU/submission` is the *program's* own CPU time (`Submission#time`), not
+whole-system CPU; the baseline file does not record it.
+
+| Version | p50 | p95 | p99 | CPU/submission | submissions/sec | RSS |
+| --- | --- | --- | --- | --- | --- | --- |
+| Baseline | 2.0549 | 30.0698 | n/a (n=5) | — | 4.74 | 1.76 GiB (under load) |
+| Event_Completion | 0.6146 | 0.8084 | 0.8084 | 0.0018 | 8.68 | — |
+| Blocking_Queue_NoFork | 0.2505 | 0.5681 | 0.5681 | 0.0012 | 20.71 | — |
+| Tmpfs_No_Sudo | 0.5364 | 0.8488 | 0.8488 | 0.0024 | 29.37 | — |
+| compilation_cache | 0.0299 | 0.6640 | 0.6640 | 0.0016 | 22.45 | — |
+| **combined_current** (all 7 commits, cold) | **0.3205** | **0.9583** | **0.9583** | 0.0018 | 24.90 | 1.00 GiB |
+
+The `compilation_cache` row looks better than the combined row because its
+compilation cache was already warm when it ran. See section 9.
+
+## 8. Final combined results
+
+`benchmarks/results_combined_current.json`, taken at HEAD (`46b57fc`), image
+built 00:37:52, run started 00:40:23. The image contains all seven commits that
+existed at that point: the last commit predates the build by seven minutes, the
+working tree is clean, and no file under `app/`, `config/`, or `db/` was
+modified after the build.
+
+Two changes landed after this run: the C++-only worker image and the language
+seed filter (`28ce721`), both documented in section 14. They were measured in
+their own run, `benchmarks/results_cpp_only.json`, and section 14 prints those
+numbers. Nothing in this section has been re-derived from them, and no ratio
+below mixes the two runs.
+
+### Latency by workload (seconds)
+
+| Workload | Baseline p50 | Combined p50 | Baseline p95 | Combined p95 |
+| --- | --- | --- | --- | --- |
+| tiny_cpp | 2.0549 | 0.3205 | 30.0698 | 0.9583 |
+| moderate_cpp | 2.0447 | 0.0264 | 30.0084 | 0.4217 |
+| compilation_error | 2.0463 | 0.0253 | 2.2446 | 0.3416 |
+| runtime_error | 2.0380 | 0.3410 | 30.0024 | 0.4631 |
+| timeout | 30.0056 | 1.1292 | 30.0081 | 1.3300 |
+| repeated_submission | 2.1453 | 0.0264 | 30.0023 | 0.0370 |
+| multi_run_5 | 2.0402 | 0.0336 | 2.0713 | 0.0443 |
+
+The `timeout` row is the clearest product-facing win: a submission with a 1 s
+CPU limit and a 2 s wall limit went from a 30 s p50 to 1.13 s p50.
+
+### Throughput (warm cache, identical source -- read section 9 caveat 3 first)
+
+| Concurrency | Baseline req/s | Combined req/s |
+| --- | --- | --- |
+| 1 | 0.50 | 47.80 |
+| 5 | 0.30 | 102.52 |
+| 10 | 4.74 | 24.90 |
+| 25 | 6.05 | 82.29 |
+| 50 | 6.10 | 121.75 |
+
+Baseline rows are from the recorded concurrency sweep; combined rows are from
+this run. Success rate was 100% at every level in both. Both columns are
+undersampled and the two runs did not use the same request count per level, so
+do not read a ratio across a row of this table.
+
+### Headline improvements
+
+These are four separate measured ratios of two measured values. They are not
+summed or compounded, and they do not describe the same request:
+
+| Measure | Baseline | Combined | Ratio |
+| --- | --- | --- | --- |
+| `tiny_cpp` p50, cold (first run after deploy) | 2.0549 | 0.3205 | 6.4x |
+| `tiny_cpp` p95 | 30.0698 | 0.9583 | 31.4x |
+| `timeout` p50 (1 s CPU / 2 s wall limit) | 30.0056 | 1.1292 | 26.6x |
+| `repeated_submission` p50 (warm cache) | 2.1453 | 0.0264 | 81.3x |
+
+The throughput ratio that used to sit in that table has been removed. The
+concurrency sweep behind it was undersampled -- see section 9 caveat 3 -- so
+`82.29 req/s` was not a supportable number, and the baseline's old sweep is not
+comparable to it level for level either. The corrected throughput measurement
+for the current state stands on its own in section 9 caveat 3: 76.59 req/s at
+concurrency 25 with 200 requests, degrading past that knee.
+
+## 9. Three caveats you should not read past
+
+**The combined run started with a cold compilation cache.** Containers came up
+about 15 seconds before the first submission, so `tiny_cpp` -- the first
+workload -- paid real compiles. Its five samples averaged 0.3581 s with a
+minimum of 0.0661 s and a maximum of 0.9583 s: the spread of a cold first
+iteration followed by cache hits. The evidence that the cache then worked is the
+next workload: `moderate_cpp` uses a *different* source, and its p50 is 0.0264 s
+with a 0.4217 s maximum -- one compile, then hits. `repeated_submission` (the
+same source as `tiny_cpp`) also lands at 0.0264 s.
+
+So the honest reading is: **cold ≈ 0.32-0.96 s, warm ≈ 0.025-0.034 s.** The
+standalone `compilation_cache` run measured 0.0299 s warm, which agrees.
+Do not quote 0.0299 s as the headline cold-start figure.
+
+**`runtime_error` has the same shape, and an earlier draft of this report
+misread it as a defect.** The `runtime_error` source is compiled for the first
+time inside its own five-iteration workload, so its p50 carries a cold compile
+exactly like `tiny_cpp`. Measured directly against the live stack, one source
+per submission, each submitted once and then repeated:
+
+| Source | run 1 | run 2 | run 3 | Status |
+| --- | --- | --- | --- | --- |
+| clean program, not seen before | 484.8 ms | 54.2 ms | 43.5 ms | Accepted |
+| `SIGSEGV` program, not seen before | 100.5 ms | 55.0 ms | 37.9 ms | Runtime Error (SIGSEGV) |
+| warm `hello`, seen before | 35.4 ms | 36.9 ms | -- | Accepted |
+
+A crashing program is not penalized: its run 2 and run 3 match a clean
+program's. The `0.3410 s` in the `runtime_error` row is a cold compile that
+then crashed, not a 340 ms crash path, and the `submission.time` of 0.0 s on
+those runs confirms the cached-binary path works for failures too. There is no
+crash-path defect to fix.
+
+One detail is worth recording because it cost real time to find. The
+compilation cache is `tmp/cache/binaries` -- `CompilationCache::CACHE_DIR`,
+which defaults to `Rails.root.join("tmp", "cache", "binaries")`. The
+three-character hex directories sitting directly under `tmp/cache/` (`0B1`,
+`120`, `1C3`, ...) are Rails' `FileStore` sharding for the show-payload cache,
+not compilation entries. Counting that directory produces confident and wrong
+statements about whether the compilation cache was cold.
+
+**The shipped concurrency sweep is undersampled, and its curve is wrong.** The
+first version of the throughput table read 47.8, 102.5, 24.9, 82.3, 121.8 req/s
+and looked non-monotonic at concurrency 10. The harness asks for
+`max(c * 2, 10)` requests per level, so c=10 was 20 requests, one of which took
+~0.8 s -- and that single request set both the wall time and the p95. Re-running
+the same code path with 200 requests per level gives a monotonic curve:
+
+| Concurrency | Requests | Throughput req/s | p50 s | p95 s |
+| --- | --- | --- | --- | --- |
+| 5 | 200 | 43.20 | 0.0741 | 0.2806 |
+| 10 | 200 | 66.31 | 0.1445 | 0.2312 |
+| 25 | 200 | 76.59 | 0.3096 | 0.4356 |
+| 50 | 200 | 57.48 | 0.7322 | 1.1719 |
+
+Two 400-request confirmation runs put concurrency 25 at 66.97 and 68.82 req/s
+and concurrency 50 at 60.00 and 59.11 req/s. So the curve rises to a knee near
+concurrency 25 and then degrades: by concurrency 50 the p50 has more than
+doubled while throughput falls. That is the shape to size a deployment against,
+and it replaces the earlier "unresolved, do not guess" note. The cause of the
+degradation past the knee has still not been attributed, and is not guessed at
+here.
+
+Read the throughput row of every stage table in this report with that in mind:
+at 10-100 requests per level, the shipped sweep cannot support a throughput
+claim. The latency tables are unaffected -- those are per-request timings, not
+throughput estimates -- and they were taken with the cache state described
+above.
+
+Also note that p95 and p99 equal the maximum at every stage because `n=5` (and
+`n=3` for `timeout` and `multi_run_5`). The tails here are observations, not
+estimates. Any claim about real p99 needs a longer run.
+
+## 10. Memory impact
+
+`docker stats`, sampled at the start and end of the combined run:
+
+| Container | Before | After |
+| --- | --- | --- |
+| worker | 825.4 MiB | 1023 MiB |
+| server | 102.1 MiB | 225.9 MiB |
+| db | 26.93 MiB | 112.9 MiB |
+| redis | 12.73 MiB | 12.92 MiB |
+
+Peak observed total is about **1.38 GiB**. The worker's growth (825 MiB to
+1.02 GiB) is the Ruby worker pool plus the compilation cache; the server and db
+growth is Rails and Postgres warming up after a fresh start.
+
+The baseline's recorded worker figure was 1.76 GiB at 70.39% CPU -- sampled
+while it was still busy, so it is not a like-for-like idle comparison. I would
+not claim a memory reduction from these two numbers; the defensible statement is
+that the current state peaks near 1.4 GiB under this load.
+
+Those figures are run-start and run-end samples of a busy stack. The stack was
+also sampled while idle -- no submissions in flight, several minutes after the
+C++-only image came up:
+
+| Container | Idle RSS |
+| --- | --- |
+| worker | 866-889 MiB |
+| server | 126-140 MiB |
+| db | 33.1 MiB |
+| redis | 10.1-10.3 MiB |
+
+Three consecutive readings of the worker gave 866.1, 866.9 and 869.4 MiB, and
+earlier idle samples in the same state reached 889 MiB; the server gave 139.4,
+139.4 and 139.5 MiB. Total idle footprint is **1.02-1.05 GiB**. This table is a
+different measurement from the one above -- different load, different moment --
+and the two are not comparable row for row.
+
+Worth stating because it is counter-intuitive: dropping five toolchains cut the
+image by 1.87 GB but the worker's idle RSS by roughly 170 MiB. The worker's
+memory is dominated by the Ruby worker pool (`COUNT` Resque workers, one per
+`nproc`), not by the toolchains on disk. The image-size win and the memory win
+are separate; do not multiply one by the other.
+
+## 11. VPS sizing
+
+Measured footprint of the whole stack (worker, server, Postgres, Redis) on this
+host:
+
+| State | Total |
+| --- | --- |
+| Idle, after the C++-only image | 1.02-1.05 GiB |
+| Peak, during the combined run | ~1.38 GiB |
+
+A **2 vCPU / 4 GB** ARM64 instance leaves comfortable headroom for the page
+cache and for `docker compose build`, which runs the isolate build stage and a
+full Ruby `bundle install` inside the same VM. 2 GB is enough to run but tight
+to build on.
+
+Throughput to size against: **76.59 req/s at concurrency 25** with 200 requests,
+on a curve that rises to a knee near concurrency 25 and then degrades -- see
+section 9 caveat 3 for the full table and the 400-request confirmations. The
+`121.75 req/s` that used to be quoted here is withdrawn: it came from an
+undersampled sweep and is not supported by a properly sized run.
+
+The worker pool is sized by `nproc`, and the measured throughput came from one
+ARM64 machine, so treat the instance recommendation as proportional: the
+compilation cache is what carries throughput here, and it is CPU-count
+independent. The worker image is 806 MB on disk / 199 MB content size (section
+14). For scale on this host that image is the largest of the three disk
+consumers: the Postgres volume reads 69.1 MB, and the compilation cache read
+1.4 MB the last time it was sampled -- immediately after being cleared for a
+cold benchmark, so treat it as a floor, not a size. The cache is the one that
+grows with the number of distinct sources; size it from production rather than
+from this host.
+
+## 12. Security implications, per change
+
+| Change | Security effect |
+| --- | --- |
+| `70c0fe6`, `02e38c7` exec by argv, no shells | **Hardening.** Removes shell interpolation of submission-derived values from the submission path, which removes a command-injection surface. `isolate_job.rb` now has zero backtick execution. |
+| `481510b` toolchain fingerprint | **Correctness and isolation.** Before, every language with a leading `VAR=value` in `compile_cmd` shared one cache key, so one language's cached binary could be served for another's submission. The key now includes the resolved compiler path, so a replaced compiler cannot serve a stale binary. |
+| `46b57fc` bytes instead of `?` | **Verdict integrity**, and an API behaviour change. Distinct non-UTF-8 outputs no longer compare equal, so they can no longer be graded Accepted. Note the consequence: responses may now carry non-UTF-8 bytes where they were previously lossily transcoded, so clients must tolerate binary payloads. |
+| `26284fa` cache compile failures | Cache keys are `SHA256` over source, arch, `language_id`, `compile_cmd`, compiler options, an `additional_files` digest, the runtime version, and the toolchain fingerprint; the entry path is that hex digest, so no user-controlled text reaches a filesystem path. Caching a failure stores only that entry's own `compile_output`. |
+| `13e9e80` collapse the queued write | None. Fewer round trips to the same row. |
+| `28ce721` language seed filter | **A refusal instead of a broken-looking verdict -- and not a containment boundary.** A submission in a language the image cannot run is now rejected by validation with the language named, instead of being accepted and handed back a shell "not found" as its `compile_output`. Do not read the filter as restricting what a submission can execute: language 89 (`Multi-file program`) ships its own `run.sh`/`run` inside the submission archive and always could, exactly as upstream. Isolate is the boundary here, and that is unchanged. |
+| `docker-compose.yml`: server unprivileged | **Hardening.** The public-facing API process no longer holds `privileged: true`, so a compromise of the request path does not arrive with the capability and device-node access that grant carries. The worker keeps it because Isolate needs cgroup delegation and sandbox mounts; that split is the reason the two services exist separately. Verified live, not assumed: `docker inspect` reports server `privileged=false` and worker `privileged=true`, and C++ submissions still return `Accepted`. |
+| Resque `FORK_PER_JOB=false` | **Documented tradeoff.** This removes a redundant process boundary between jobs. Untrusted code still never executes in the Ruby process -- Isolate is the boundary -- but a worker process now serves many jobs without a fresh fork, so a leak would persist across jobs. Worth revisiting if the worker's RSS growth in section 10 turns out to be unbounded. |
+| Compilation cache overall | A cached binary is reused across submissions by content hash. This is only safe because the key covers the toolchain and the extra files; anyone changing what feeds the key should re-read `CompilationCache.cache_key` first. |
+
+## 13. What was preserved
+
+The brief requires that isolation was not traded away for latency. Verified in
+source, not from memory:
+
+- **`-d /etc:noexec`** -- present in `sandbox_argv` (`app/jobs/isolate_job.rb`).
+- **Timeouts** -- `cpu_time_limit`, `wall_time_limit`, and the extra-time budget
+  still flow into the isolate invocation. The `timeout` workload still returns
+  `Time Limit Exceeded`, at 1.1292 s p50 against its own 1 s limit.
+- **Process and thread cap** -- `max_processes_and_or_threads: 60` unchanged.
+- **Isolation model** -- still Isolate, one box per submission.
+- **The worker's privilege grant** -- the API service now runs unprivileged
+  (section 14), but the worker still holds `privileged: true`, because Isolate
+  needs cgroup delegation and sandbox mounts. The grant moved to the one service
+  that uses it; it was not dropped.
+
+One nuance to record rather than discover later: the ARM64 wrapper
+(`isolate-wrapper.sh`) rewrites cgroup-only flags into rlimit equivalents,
+because this platform has no working cgroup delegation. It drops `--cg`,
+`--cg-timing`, and `--no-cg-timing`, and rewrites `--cg-mem=N` into `-m N`.
+On the live path `enable_per_process_and_thread_memory_limit` is `false`, so
+`memory_limit_args` emits `--cg-mem=N`, which the wrapper turns into `-m N`.
+Memory is therefore enforced by `RLIMIT_AS`, a real cap, but it bounds address
+space rather than resident memory -- a different guarantee from cgroup
+accounting, and one that can mis-report runtimes which reserve large mappings
+(notably the JVM and Go). Consequently `--cg` in `base_argv` is currently a
+no-op: deterministic and with no live behaviour change, but noisy to a reader.
+The C++-only image takes the JVM and Go out of the picture for now, which makes
+this latent rather than live -- it matters again the moment a language row is
+added back.
+
+## 14. C++-only ARM64 worker image
+
+This is priority 16 from the brief: the image should contain the toolchain the
+product actually uses, and nothing else. It touches three files --
+`Dockerfile.arm64`, `docker-compose.yml`, and `db/seeds.rb` (`28ce721`) -- and
+none of them is on the submission path that the other sections measure.
+
+### What was removed, and what was kept
+
+The apt list used to install five extra toolchains on top of the C++ one:
+`python3`, `python3-pip`, `default-jdk`, `nodejs`, `npm`, `golang-go`, `rustc`.
+Those names are gone, along with every compatibility symlink that existed to
+make the matching language row resolve -- the python, node, java, ruby, rust and
+go directories under `/usr/local/`. The comment in the Dockerfile names the
+fail-fast consequence and the recovery step, because a reader who wonders why a
+Python submission is refused should not have to reconstruct the reasoning.
+
+Kept deliberately, because a seeded language names them:
+
+- `/usr/local/gcc-7.4.0`, `/usr/local/gcc-8.3.0` and `/usr/local/gcc-9.2.0`,
+  both `bin` and `lib64`, all pointing at `/usr/bin/gcc`, `/usr/bin/g++` and
+  `/usr/lib/aarch64-linux-gnu`. Those links are what make language ids 48/49/50
+  (C) and 52/53/54 (C++) interchangeable here despite the version numbers in
+  their names -- there is one real compiler, and three rows that reach it.
+- `/usr/local/bash-5.0/bin/bash`, for language 46 (Bash (5.0.0)).
+- `gcc` and `g++` are named explicitly in the apt list even though
+  `build-essential` already pulls them, so the dependency a reader cares about
+  is visible in the file instead of inferred from a metapackage.
+
+### Measured effect
+
+| Metric | Before | After |
+| --- | --- | --- |
+| Image, `docker images` DISK USAGE | 2.68 GB | **806 MB** |
+| Image, `docker images` CONTENT SIZE | 672 MB | **199 MB** |
+| Worker, idle RSS | 1060 MiB | **866-889 MiB** |
+| Server, idle RSS | 227.7 MiB | **126-140 MiB** |
+| db, idle RSS | 33.9 MiB | 33.1 MiB |
+| redis, idle RSS | 13.02 MiB | 10.1-10.3 MiB |
+
+Both image rows use the same metric on both sides, from the same tool. The image
+ID changed from `16e7f156ba75` to `46d4fca75da9`.
+
+The memory rows are idle steady state, sampled minutes apart with no submissions
+in flight; the worker ranged 866.1-889 MiB across samples and the server
+139.4-139.5 MiB in a run of three consecutive readings. They are a different
+measurement from section 10's busy-stack table and are not comparable to it row
+for row. The before column is one reading each of the previous image, so treat
+it as a point rather than a distribution.
+
+Counter-intuitive, so it is stated rather than left to be discovered: removing
+five toolchains cut 1.87 GB off the image and only about 170 MiB off the worker's
+idle RSS. The worker's memory is dominated by the Ruby worker pool (`COUNT`
+Resque workers, one per `nproc`), not by the toolchains on disk. The image-size
+win and the memory win are separate, and neither is a percentage of the other.
+
+Cold start, measured with this image: `docker compose up -d` brings the API up
+at **8.66 s**, and the first accepted submission completes at **11.27 s**. A
+server-only restart is back in 5.84 s. Rebuild time is not a speedup claim: the
+image's layer timestamps bracket its last rebuild at **69 s** (first rebuilt
+layer 00:53:24, final layer 00:54:33) with the Ubuntu base reused from Docker's
+layer cache. The previous Dockerfile exists in no repository -- see the
+version-control caveat -- so there is no before figure to divide by.
+
+### Which languages this image can actually run
+
+The seed used to create all 47 active language rows. Advertising a language
+whose interpreter is not in the image is worse than not offering it: the
+submission is accepted, and the shell's "not found" comes back as the
+`compile_output` of a compilation error, which reads like a broken judge rather
+than a refusal.
+
+To find the real set, each language's `compile_cmd` and `run_cmd` was split with
+Ruby's `Shellwords.split` and every token that names a path was tested for
+existence inside the running worker. Splitting properly matters: a
+regular-expression sweep produced false hits from `g++` matching `g`, from the
+`//g` inside `LD_LIBRARY_PATH=` prefixes, and from `mkdir` arguments. It also
+under-counts entries that need more than one binary -- SQL needs both `sqlite3`
+and `cat` -- which is why the probe tests paths rather than package names.
+
+Eleven of the 47 run:
+
+| id | Language |
+| --- | --- |
+| 43 | Plain Text |
+| 44 | Executable |
+| 46 | Bash (5.0.0) |
+| 48 | C (GCC 7.4.0) |
+| 49 | C (GCC 8.3.0) |
+| 50 | C (GCC 9.2.0) |
+| 52 | C++ (GCC 7.4.0) |
+| 53 | C++ (GCC 8.3.0) |
+| 54 | C++ (GCC 9.2.0) |
+| 85 | Perl (5.28.1) |
+| 89 | Multi-file program |
+
+Those eleven ids are now the `SUPPORTED_LANGUAGE_IDS` constant in
+`db/seeds.rb`, and the seed skips anything else. The other 36 active rows do not
+run here: Assembly (45), Basic (47), C# (51), Common Lisp (55), D (56), Elixir
+(57), Erlang (58), Fortran (59), Go (60), Haskell (61), Java (62), JavaScript
+(63), Lua (64), OCaml (65), Octave (66), Pascal (67), PHP (68), Prolog (69) --
+that one needs a directory on `PATH`, not just a binary -- Python 2.7 (70),
+Python 3.8 (71), Ruby (72), Rust (73), TypeScript (74), C (75) and C++ (76) with
+Clang, COBOL (77), Kotlin (78), Objective-C (79), R (80), Scala (81), SQL (82),
+Swift (83), VB.Net (84), Clojure (86), F# (87), Groovy (88).
+
+### Fail-fast, with the payloads you will see
+
+Live against the running stack, after the rebuild:
+
+```text
+GET /languages            -> HTTP 200, exactly the 11 rows above
+POST /submissions id 54   -> HTTP 201, {"stdout":"42\n", "status":{"id":3,"description":"Accepted"}}
+POST /submissions id 89   -> HTTP 201, a zip whose run.sh echoes hello -> Accepted, that stdout
+POST /submissions id 71   -> HTTP 422, {"language_id":["language with id 71 doesn't exist"]}
+POST /submissions id 62   -> HTTP 422, {"language_id":["language with id 62 doesn't exist"]}
+```
+
+The refusal names the language and never reaches a worker. The row that
+disappeared from the seed still exists in the upstream language list, so it can
+be restored by adding its package back to the Dockerfile and its id back to
+`SUPPORTED_LANGUAGE_IDS` -- both recovery steps are written next to the code
+that would need editing.
+
+One path was checked because a submission can outlive the filter that would
+reject it: a row created before the filter, pointing at an id that is no longer
+seeded. `LanguageSerializer` serializes `id` and `name` straight off the
+language row and never dereferences `submission.language`, so such a submission
+serializes with `language: null` instead of raising. It is a display outcome,
+not a 500.
+
+The filter is not a containment boundary and is not documented as one. A
+`Multi-file program` submission (id 89) ships its own `run.sh`/`run` inside its
+archive and always could -- that is upstream's project feature, and Isolate, not
+the language list, is what contains it. That row is reachable and was checked
+rather than assumed: a zip containing an executable `run.sh` that echoes a
+string came back `Accepted` with that string as stdout. What the filter fixes is
+that the judge no longer advertises 36 languages it cannot run.
+
+### The API service is unprivileged now
+
+`docker-compose.yml` no longer grants `privileged: true` to the `server`
+service. The worker keeps it, and needs it: Isolate writes cgroup delegation and
+mounts sandbox filesystems, which is exactly the privilege separation the
+two-service layout exists to allow. That split is now written down in the
+compose file next to the flag, so the next person to read it does not have to
+guess which service is supposed to hold the grant.
+
+The claim that the API does not need it was checked in source rather than
+assumed: `docker-entrypoint.sh` starts cron and then `exec`s its argument, and
+`scripts/server` runs `rails db:create db:migrate db:seed` followed by
+`rails s -b 0.0.0.0` (and dumps its environment to `/api/environment`). None of
+that touches cgroups, mounts, or sysctls. Verified live afterwards: `docker
+inspect` reports `server privileged=false` and `worker privileged=true`, and a
+C++ submission still returns `Accepted`. Security implications are in section
+12; the seed-filter row there records what the filter is and is not.
+
+### No latency claim
+
+The image was benchmarked in its own run, `benchmarks/results_cpp_only.json`
+(run 01:00:23), with the compilation cache cleared first so it would start as
+cold as the stored combined run did. Same workload shapes, same harness:
+
+| Workload | p50 before | p50 after | p95 before | p95 after |
+| --- | --- | --- | --- | --- |
+| tiny_cpp | 0.3205 | 0.1142 | 0.9583 | 1.1819 |
+| moderate_cpp | 0.0264 | 0.0416 | 0.4217 | 0.4558 |
+| compilation_error | 0.0253 | 0.0606 | 0.3416 | 1.1406 |
+| runtime_error | 0.3410 | 0.0414 | 0.4631 | 0.8053 |
+| timeout | 1.1292 | 1.2801 | 1.3300 | 1.4217 |
+| repeated_submission | 0.0264 | 0.0684 | 0.0370 | 0.8664 |
+| multi_run_5 | 0.0336 | 0.0988 | 0.0443 | 0.1486 |
+
+Read this as "not attributable at this sample size" and nothing more, in either
+direction. Every row is a cold-cache run, and at three to five samples per
+workload the p95 column *is* the largest sample. Look at what actually moved:
+five of seven p50 rows and all seven p95 rows sit above the before column, in
+the tens of milliseconds -- small, but too consistent to call free -- while
+`runtime_error` moved from 0.3410 to 0.0414 s, which is caveat 2's cold-compile
+artifact disappearing rather than an effect of the image.
+
+Two things are confounded here and neither is separated by this run: the two
+measurements were taken at different times on a machine doing different amounts
+of other work, and five samples cannot tell a 20 ms shift from noise. So no
+latency improvement is claimed for this change, and no regression is claimed
+either -- the statement is that this run does not attribute one. **The value of
+this change is image size, build time, and attack surface.** If a latency answer
+is needed, re-run both states with n>=50 on a quiet machine; the harness already
+supports request counts that size (caveat 3).
+
+One trap worth repeating for whoever re-runs this: the compilation cache is
+`tmp/cache/binaries`. The three-character hex directories under `tmp/cache/` are
+Rails `FileStore` shards for show payloads, and counting them will make a warm
+cache look cold.
+
+## 15. Remaining bottlenecks
+
+Two items that used to head this list are withdrawn rather than renumbered.
+The `runtime_error` crash path was a cold-cache artifact with no defect behind
+it (section 9 caveat 2), and the concurrency-10 stall was an undersampled sweep
+(caveat 3). What actually remains:
+
+1. **Cold compiles cost about 240 ms** and are now the largest single cost on a
+   cache miss. A tiny C++ program takes 247 / 289 / 190 ms to compile and link
+   inside the worker, of which roughly 45 ms is the link. The compilation cache
+   hides this whenever the same source is submitted again -- Gator++'s common
+   case -- so its real frequency is "how often a student submits something new".
+   Section 16 proposes the fix and its measured ceiling.
+2. **Compile and exec still share one worker pool.** A compile-heavy burst and a
+   run-heavy burst contend for the same slots, and a compile is ~5x the cost of
+   a cache-hit run.
+3. **`ENABLE_WAIT_RESULT`** defaults to true and Gator++ uses it, so these
+   numbers are the synchronous worst case. The callback or async path was not
+   measured.
+4. **Throughput falls past concurrency 25.** The curve is measured; the
+   mechanism is not, and is not guessed at here. Anyone sizing past 25
+   concurrent submissions should attribute that knee first.
+5. **`batch_create`** does N independent saves plus N `exists?` queries. The
+   brief caps the batch at 20, which bounds it, but it is still N round trips.
+6. **An x86-64 binary is still shipped in an ARM64 image.** `judge0-src/bin/telemetry`
+   is an `ELF 64-bit LSB pie executable, x86-64`, and `JUDGE0_TELEMETRY_ENABLE`
+   is unset in `judge0.conf`, so it is never executed. It is dead weight today
+   and a broken promise the moment someone enables it. Either it goes, or it
+   gets built for the platform -- this is priority 18's concrete item.
+
+Not done from the brief, and why:
+
+| Priority | Status |
+| --- | --- |
+| 16 (C++-only ARM64 image) | **Done** -- section 14: 2.68 GB to 806 MB, 36 languages filtered out of the seed, API service unprivileged. |
+| 14 (callbacks) | Recommended as YAGNI. `ENABLE_CALLBACKS` is unset and `callback_url` is unused by Gator++. |
+| 12 (drop internal Base64) | Not started. Columns are already `text`, with one `binary` for `additional_files`. |
+| 15 (compile/exec slot scheduler) | Not started -- still bottleneck 2. |
+| 17 (Rust execution plane) | Long-term, not started. |
+| 18 (ARM64-native validation) | Not started. Concrete item: the x86-64 `bin/telemetry` above. |
+| 10 (hot/cold status split), 11 (remainder), 13 (SSE remainder), 19 (retention) | Not started. |
+
+## 16. Recommended next optimization
+
+**Precompile the C++ headers the product actually uses, and expose the result
+read-only inside the sandbox.** A cold compile is ~240 ms, the only remaining
+cost of that size on the submission path (bottleneck 1), and the measured fix
+takes it to ~85 ms -- about 2.8x. Measured inside the worker container, g++
+11.4.0, ARM64. These are g++'s own times, not end-to-end submission latency;
+the end-to-end cold numbers are in section 9 caveat 1:
+
+| Configuration | Time |
+| --- | --- |
+| `-O0 -pipe`, full compile and link | 247 / 289 / 190 ms (~240 ms) |
+| `-O0 -c`, compile only | 185 / 139 / 163 ms (~160 ms) |
+| link only | 50 / 43 / 47 ms (~45 ms) |
+| `-Og`, full compile and link | 340 / 226 / 209 ms -- **worse than `-O0`** |
+| `<iostream>` PCH, one-time build | 477 ms |
+| full compile and link with the `<iostream>` PCH | 76 / 83 / 93 ms (**~85 ms**) |
+| `<bits/stdc++.h>` PCH, one-time build | 6,618 ms, 116 MB |
+
+Three decisions fall out of that table before any code is written:
+
+- **Keep `-O0`.** That is the measured answer to the brief's `-O0` vs `-Og`
+  question: at this program size `-Og` averages 258 ms against `-O0`'s 242 ms
+  and peaks at 340 ms, so it costs more to compile while buying optimisation for
+  a program that runs for microseconds. This workload is judged on feedback
+  latency.
+- **`<bits/stdc++.h>` is a trap here.** 116 MB and 6.6 s to build, for a header
+  the C++ path does not need. `<iostream>`-class headers, at 26 MB, are the
+  target.
+- **Linker speedups are not available.** `lld` is not installed in this image,
+  so any `fuse-ld=lld` timing is a failed compile rather than a fast one. Do not
+  cite it.
+
+The open decision is exposure, not speed. A 26 MB header cannot be copied into
+the box per submission -- the copy would cost more than the 160 ms it saves. It
+has to be built once in `Dockerfile.arm64` and mounted read-only inside the
+sandbox next to the existing `-d /etc:noexec` pattern, and doing that must not
+weaken isolation: compiler input has no business being writable, and nothing
+user-supplied should be able to reach the mount.
+
+Its ceiling is bounded and the bound belongs in the proposal: a PCH only helps a
+cache *miss*, and the compilation cache already serves Gator++'s common case of
+a repeated source. Measure how often a miss actually happens before building it.
+
+---
+
+### Version-control caveat
+
+`judge0-src/` is a git repository and holds all eight commits. The fork files
+that live beside it -- `Dockerfile.arm64`, `isolate-wrapper.sh`,
+`docker-compose.yml`, `judge0.conf`, `checks/`, `benchmarks/`, and this report --
+are **not** under version control; the fork root is not a repository. Roughly
+half the project therefore has no history and no backup. Running `git init` at
+the fork root is the obvious fix and has not been done, because it changes the
+layout of the project.
+
+That gap now has a measured cost attached to it, which is worth recording: the
+previous `Dockerfile.arm64` -- the one with the five extra toolchains -- exists
+in no repository, so section 14 can report the current image's 69 s rebuild but
+has no before figure to divide by. A one-file change to an untracked Dockerfile
+is also the reason `db/seeds.rb` had to be committed on its own in `28ce721`
+while the image it depends on was not.

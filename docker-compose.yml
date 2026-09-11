@@ -1,0 +1,60 @@
+version: "3.8"
+
+services:
+  # The API service only talks to Postgres and Redis and enqueues jobs; it never
+  # runs a submission and never touches a cgroup. It therefore runs
+  # unprivileged, which is what priority 16 asks for and what keeps a compromise
+  # of the public-facing process off the host's device nodes.
+  #
+  # The worker keeps `privileged: true`: Isolate needs to write cgroup
+  # delegation and mount sandbox filesystems. That grant is the reason the two
+  # services exist separately.
+  server:
+    build:
+      context: .
+      dockerfile: Dockerfile.arm64
+    image: judge0:arm64-native
+    volumes:
+      - ./judge0-src:/api
+      - ./isolate-wrapper.sh:/usr/local/bin/isolate:ro
+      - ./judge0.conf:/judge0.conf:ro
+      - ./judge0.conf:/api/judge0.conf:ro
+    env_file: judge0.conf
+    ports:
+      - "2358:2358"
+    restart: unless-stopped
+    depends_on:
+      - db
+      - redis
+
+  worker:
+    image: judge0:arm64-native
+    command: ["./scripts/workers"]
+    volumes:
+      - ./judge0-src:/api
+      - ./isolate-wrapper.sh:/usr/local/bin/isolate:ro
+      - ./judge0.conf:/judge0.conf:ro
+      - ./judge0.conf:/api/judge0.conf:ro
+    env_file: judge0.conf
+    privileged: true
+    restart: unless-stopped
+    depends_on:
+      - db
+      - redis
+      - server
+
+  db:
+    image: postgres:16
+    env_file: judge0.conf
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    restart: unless-stopped
+
+  redis:
+    image: redis:7
+    command: ["redis-server", "--appendonly", "no", "--requirepass", "judge0"]
+    env_file: judge0.conf
+    restart: unless-stopped
+
+volumes:
+  postgres-data:

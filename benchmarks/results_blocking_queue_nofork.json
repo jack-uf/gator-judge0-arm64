@@ -1,0 +1,481 @@
+{
+  "label": "Blocking_Queue_NoFork",
+  "timestamp": 1789068915.637195,
+  "docker_stats_before": {
+    "native_judge0-worker-1": {
+      "cpu": "1.95%",
+      "mem": "832.9MiB / 7.652GiB"
+    },
+    "native_judge0-server-1": {
+      "cpu": "0.05%",
+      "mem": "122.8MiB / 7.652GiB"
+    },
+    "native_judge0-db-1": {
+      "cpu": "0.02%",
+      "mem": "29.62MiB / 7.652GiB"
+    },
+    "native_judge0-redis-1": {
+      "cpu": "0.85%",
+      "mem": "12.8MiB / 7.652GiB"
+    }
+  },
+  "docker_stats_after": {
+    "native_judge0-worker-1": {
+      "cpu": "3.90%",
+      "mem": "1019MiB / 7.652GiB"
+    },
+    "native_judge0-server-1": {
+      "cpu": "0.12%",
+      "mem": "217MiB / 7.652GiB"
+    },
+    "native_judge0-db-1": {
+      "cpu": "0.26%",
+      "mem": "109.5MiB / 7.652GiB"
+    },
+    "native_judge0-redis-1": {
+      "cpu": "0.61%",
+      "mem": "12.93MiB / 7.652GiB"
+    }
+  },
+  "workloads": [
+    {
+      "workload": "tiny_cpp",
+      "iterations": 5,
+      "avg_latency_s": 0.3113,
+      "min_latency_s": 0.2272,
+      "max_latency_s": 0.5681,
+      "p50_s": 0.2505,
+      "p95_s": 0.5681,
+      "p99_s": 0.5681,
+      "avg_program_cpu_s": 0.0012,
+      "statuses": [
+        "Accepted"
+      ],
+      "details_sample": {
+        "source_code": "#include <iostream>\nint main() {\n    std::cout << \"Hello Gator++\" << std::endl;\n    return 0;\n}\n",
+        "language_id": 54,
+        "stdin": null,
+        "expected_output": null,
+        "stdout": "Hello Gator++\n",
+        "status_id": 3,
+        "created_at": "2026-09-10T19:34:38.081Z",
+        "finished_at": "2026-09-10T19:34:38.578Z",
+        "time": "0.001",
+        "memory": 3112,
+        "stderr": null,
+        "token": "ef08b870-82d7-4b83-a7f5-b1e08b5a361d",
+        "number_of_runs": 1,
+        "cpu_time_limit": "5.0",
+        "cpu_extra_time": "1.0",
+        "wall_time_limit": "10.0",
+        "memory_limit": 128000,
+        "stack_limit": 64000,
+        "max_processes_and_or_threads": 60,
+        "enable_per_process_and_thread_time_limit": false,
+        "enable_per_process_and_thread_memory_limit": false,
+        "max_file_size": 1024,
+        "compile_output": null,
+        "exit_code": 0,
+        "exit_signal": null,
+        "message": null,
+        "wall_time": "0.001",
+        "compiler_options": null,
+        "command_line_arguments": null,
+        "redirect_stderr_to_stdout": false,
+        "callback_url": null,
+        "additional_files": null,
+        "enable_network": false,
+        "started_at": "2026-09-10T19:34:38.371Z",
+        "queued_at": "2026-09-10T19:34:38.086Z",
+        "updated_at": "2026-09-10T19:34:38.598Z",
+        "queue_host": "9c4712bdbc1f",
+        "execution_host": "9cd3bfed0d80",
+        "status": {
+          "id": 3,
+          "description": "Accepted"
+        },
+        "language": {
+          "id": 54,
+          "name": "C++ (GCC 9.2.0)"
+        }
+      }
+    },
+    {
+      "workload": "moderate_cpp",
+      "iterations": 5,
+      "avg_latency_s": 0.4782,
+      "min_latency_s": 0.3565,
+      "max_latency_s": 0.6499,
+      "p50_s": 0.3754,
+      "p95_s": 0.6499,
+      "p99_s": 0.6499,
+      "avg_program_cpu_s": 0.0012,
+      "statuses": [
+        "Accepted"
+      ],
+      "details_sample": {
+        "source_code": "#include <iostream>\n#include <vector>\n#include <string>\n#include <algorithm>\n#include <numeric>\n#include <map>\n\nint main() {\n    std::vector<std::string> words = {\n        \"gator\", \"compiler\", \"sandbox\", \"isolate\", \"benchmark\",\n        \"student\", \"challenge\", \"optimization\", \"concurrency\", \"throughput\"\n    };\n    std::sort(words.begin(), words.end());\n    std::map<char, int> freq;\n    for (const auto& w : words) {\n        for (char c : w) freq[c]++;\n    }\n    int total_chars = std::accumulate(words.begin(), words.end(), 0,\n        [](int sum, const std::string& s) { return sum + (int)s.length(); });\n    std::cout << \"Chars: \" << total_chars << \", distinct: \" << freq.size() << std::endl;\n    return 0;\n}\n",
+        "language_id": 54,
+        "stdin": null,
+        "expected_output": null,
+        "stdout": "Chars: 85, distinct: 21\n",
+        "status_id": 3,
+        "created_at": "2026-09-10T19:34:40.173Z",
+        "finished_at": "2026-09-10T19:34:40.503Z",
+        "time": "0.001",
+        "memory": 3252,
+        "stderr": null,
+        "token": "8e1e39c1-70db-4a1b-92e4-3451abd173e1",
+        "number_of_runs": 1,
+        "cpu_time_limit": "5.0",
+        "cpu_extra_time": "1.0",
+        "wall_time_limit": "10.0",
+        "memory_limit": 128000,
+        "stack_limit": 64000,
+        "max_processes_and_or_threads": 60,
+        "enable_per_process_and_thread_time_limit": false,
+        "enable_per_process_and_thread_memory_limit": false,
+        "max_file_size": 1024,
+        "compile_output": null,
+        "exit_code": 0,
+        "exit_signal": null,
+        "message": null,
+        "wall_time": "0.001",
+        "compiler_options": null,
+        "command_line_arguments": null,
+        "redirect_stderr_to_stdout": false,
+        "callback_url": null,
+        "additional_files": null,
+        "enable_network": false,
+        "started_at": "2026-09-10T19:34:40.180Z",
+        "queued_at": "2026-09-10T19:34:40.175Z",
+        "updated_at": "2026-09-10T19:34:40.519Z",
+        "queue_host": "9c4712bdbc1f",
+        "execution_host": "9cd3bfed0d80",
+        "status": {
+          "id": 3,
+          "description": "Accepted"
+        },
+        "language": {
+          "id": 54,
+          "name": "C++ (GCC 9.2.0)"
+        }
+      }
+    },
+    {
+      "workload": "compilation_error",
+      "iterations": 5,
+      "avg_latency_s": 0.1901,
+      "min_latency_s": 0.18,
+      "max_latency_s": 0.2119,
+      "p50_s": 0.1842,
+      "p95_s": 0.2119,
+      "p99_s": 0.2119,
+      "avg_program_cpu_s": null,
+      "statuses": [
+        "some attributes for this submission cannot be converted to UTF-8, use base64_encoded=true query parameter"
+      ],
+      "details_sample": {}
+    },
+    {
+      "workload": "runtime_error",
+      "iterations": 5,
+      "avg_latency_s": 0.3305,
+      "min_latency_s": 0.218,
+      "max_latency_s": 0.4877,
+      "p50_s": 0.238,
+      "p95_s": 0.4877,
+      "p99_s": 0.4877,
+      "avg_program_cpu_s": 0.0012,
+      "statuses": [
+        "Runtime Error (NZEC)"
+      ],
+      "details_sample": {
+        "source_code": "#include <iostream>\nint main() {\n    int* ptr = nullptr;\n    *ptr = 42;\n    return 0;\n}\n",
+        "language_id": 54,
+        "stdin": null,
+        "expected_output": null,
+        "stdout": null,
+        "status_id": 11,
+        "created_at": "2026-09-10T19:34:44.645Z",
+        "finished_at": "2026-09-10T19:34:44.837Z",
+        "time": "0.001",
+        "memory": 3132,
+        "stderr": "run.sh: line 1:     3 Segmentation fault      LD_LIBRARY_PATH=/usr/local/gcc-9.2.0/lib64 ./a.out\n",
+        "token": "c36b4a4b-f879-4e88-b8b6-02790f8507d2",
+        "number_of_runs": 1,
+        "cpu_time_limit": "5.0",
+        "cpu_extra_time": "1.0",
+        "wall_time_limit": "10.0",
+        "memory_limit": 128000,
+        "stack_limit": 64000,
+        "max_processes_and_or_threads": 60,
+        "enable_per_process_and_thread_time_limit": false,
+        "enable_per_process_and_thread_memory_limit": false,
+        "max_file_size": 1024,
+        "compile_output": null,
+        "exit_code": 139,
+        "exit_signal": null,
+        "message": "Exited with error status 139",
+        "wall_time": "0.001",
+        "compiler_options": null,
+        "command_line_arguments": null,
+        "redirect_stderr_to_stdout": false,
+        "callback_url": null,
+        "additional_files": null,
+        "enable_network": false,
+        "started_at": "2026-09-10T19:34:44.653Z",
+        "queued_at": "2026-09-10T19:34:44.648Z",
+        "updated_at": "2026-09-10T19:34:44.854Z",
+        "queue_host": "9c4712bdbc1f",
+        "execution_host": "9cd3bfed0d80",
+        "status": {
+          "id": 11,
+          "description": "Runtime Error (NZEC)"
+        },
+        "language": {
+          "id": 54,
+          "name": "C++ (GCC 9.2.0)"
+        }
+      }
+    },
+    {
+      "workload": "timeout",
+      "iterations": 3,
+      "avg_latency_s": 2.3452,
+      "min_latency_s": 2.2153,
+      "max_latency_s": 2.5939,
+      "p50_s": 2.2263,
+      "p95_s": 2.5939,
+      "p99_s": 2.5939,
+      "avg_program_cpu_s": 2.0373,
+      "statuses": [
+        "Time Limit Exceeded"
+      ],
+      "details_sample": {
+        "source_code": "#include <iostream>\nint main() {\n    while (true) {}\n    return 0;\n}\n",
+        "language_id": 54,
+        "stdin": null,
+        "expected_output": null,
+        "stdout": null,
+        "status_id": 5,
+        "created_at": "2026-09-10T19:34:46.862Z",
+        "finished_at": "2026-09-10T19:34:49.052Z",
+        "time": "2.002",
+        "memory": 3068,
+        "stderr": null,
+        "token": "69156fe0-dac9-4422-8e28-7117637a8fba",
+        "number_of_runs": 1,
+        "cpu_time_limit": "1.0",
+        "cpu_extra_time": "1.0",
+        "wall_time_limit": "2.0",
+        "memory_limit": 128000,
+        "stack_limit": 64000,
+        "max_processes_and_or_threads": 60,
+        "enable_per_process_and_thread_time_limit": false,
+        "enable_per_process_and_thread_memory_limit": false,
+        "max_file_size": 1024,
+        "compile_output": null,
+        "exit_code": 0,
+        "exit_signal": null,
+        "message": "Time limit exceeded (wall clock)",
+        "wall_time": "2.002",
+        "compiler_options": null,
+        "command_line_arguments": null,
+        "redirect_stderr_to_stdout": false,
+        "callback_url": null,
+        "additional_files": null,
+        "enable_network": false,
+        "started_at": "2026-09-10T19:34:46.871Z",
+        "queued_at": "2026-09-10T19:34:46.865Z",
+        "updated_at": "2026-09-10T19:34:49.068Z",
+        "queue_host": "9c4712bdbc1f",
+        "execution_host": "9cd3bfed0d80",
+        "status": {
+          "id": 5,
+          "description": "Time Limit Exceeded"
+        },
+        "language": {
+          "id": 54,
+          "name": "C++ (GCC 9.2.0)"
+        }
+      }
+    },
+    {
+      "workload": "repeated_submission",
+      "iterations": 5,
+      "avg_latency_s": 0.2891,
+      "min_latency_s": 0.2151,
+      "max_latency_s": 0.5425,
+      "p50_s": 0.221,
+      "p95_s": 0.5425,
+      "p99_s": 0.5425,
+      "avg_program_cpu_s": 0.001,
+      "statuses": [
+        "Accepted"
+      ],
+      "details_sample": {
+        "source_code": "#include <iostream>\nint main() {\n    std::cout << \"Hello Gator++\" << std::endl;\n    return 0;\n}\n",
+        "language_id": 54,
+        "stdin": null,
+        "expected_output": null,
+        "stdout": "Hello Gator++\n",
+        "status_id": 3,
+        "created_at": "2026-09-10T19:34:54.231Z",
+        "finished_at": "2026-09-10T19:34:54.745Z",
+        "time": "0.001",
+        "memory": 3100,
+        "stderr": null,
+        "token": "4b85cc4d-197b-4c2c-a73e-686cd4571c84",
+        "number_of_runs": 1,
+        "cpu_time_limit": "5.0",
+        "cpu_extra_time": "1.0",
+        "wall_time_limit": "10.0",
+        "memory_limit": 128000,
+        "stack_limit": 64000,
+        "max_processes_and_or_threads": 60,
+        "enable_per_process_and_thread_time_limit": false,
+        "enable_per_process_and_thread_memory_limit": false,
+        "max_file_size": 1024,
+        "compile_output": null,
+        "exit_code": 0,
+        "exit_signal": null,
+        "message": null,
+        "wall_time": "0.001",
+        "compiler_options": null,
+        "command_line_arguments": null,
+        "redirect_stderr_to_stdout": false,
+        "callback_url": null,
+        "additional_files": null,
+        "enable_network": false,
+        "started_at": "2026-09-10T19:34:54.558Z",
+        "queued_at": "2026-09-10T19:34:54.233Z",
+        "updated_at": "2026-09-10T19:34:54.760Z",
+        "queue_host": "9c4712bdbc1f",
+        "execution_host": "9cd3bfed0d80",
+        "status": {
+          "id": 3,
+          "description": "Accepted"
+        },
+        "language": {
+          "id": 54,
+          "name": "C++ (GCC 9.2.0)"
+        }
+      }
+    },
+    {
+      "workload": "multi_run_5",
+      "iterations": 3,
+      "avg_latency_s": 1.0874,
+      "min_latency_s": 0.9592,
+      "max_latency_s": 1.2638,
+      "p50_s": 1.0392,
+      "p95_s": 1.2638,
+      "p99_s": 1.2638,
+      "avg_program_cpu_s": 0.0012,
+      "statuses": [
+        "Accepted"
+      ],
+      "details_sample": {
+        "source_code": "#include <iostream>\nint main() {\n    std::cout << \"Hello Gator++\" << std::endl;\n    return 0;\n}\n",
+        "language_id": 54,
+        "stdin": null,
+        "expected_output": null,
+        "stdout": "Hello Gator++\n",
+        "status_id": 3,
+        "created_at": "2026-09-10T19:34:56.239Z",
+        "finished_at": "2026-09-10T19:34:57.253Z",
+        "time": "0.0012",
+        "memory": 3156,
+        "stderr": null,
+        "token": "edc11494-72b0-4677-bd83-1bd12b192c91",
+        "number_of_runs": 5,
+        "cpu_time_limit": "5.0",
+        "cpu_extra_time": "1.0",
+        "wall_time_limit": "10.0",
+        "memory_limit": 128000,
+        "stack_limit": 64000,
+        "max_processes_and_or_threads": 60,
+        "enable_per_process_and_thread_time_limit": false,
+        "enable_per_process_and_thread_memory_limit": false,
+        "max_file_size": 1024,
+        "compile_output": null,
+        "exit_code": 0,
+        "exit_signal": null,
+        "message": null,
+        "wall_time": "0.001",
+        "compiler_options": null,
+        "command_line_arguments": null,
+        "redirect_stderr_to_stdout": false,
+        "callback_url": null,
+        "additional_files": null,
+        "enable_network": false,
+        "started_at": "2026-09-10T19:34:56.246Z",
+        "queued_at": "2026-09-10T19:34:56.241Z",
+        "updated_at": "2026-09-10T19:34:57.269Z",
+        "queue_host": "9c4712bdbc1f",
+        "execution_host": "9cd3bfed0d80",
+        "status": {
+          "id": 3,
+          "description": "Accepted"
+        },
+        "language": {
+          "id": 54,
+          "name": "C++ (GCC 9.2.0)"
+        }
+      }
+    }
+  ],
+  "concurrency": [
+    {
+      "concurrency": 1,
+      "total_requests": 10,
+      "total_time_s": 2.024,
+      "throughput_req_per_s": 4.94,
+      "p50_s": 0.2005,
+      "p95_s": 0.2202,
+      "p99_s": 0.2202,
+      "success_rate": 100.0
+    },
+    {
+      "concurrency": 5,
+      "total_requests": 10,
+      "total_time_s": 0.958,
+      "throughput_req_per_s": 10.44,
+      "p50_s": 0.2979,
+      "p95_s": 0.7545,
+      "p99_s": 0.7545,
+      "success_rate": 100.0
+    },
+    {
+      "concurrency": 10,
+      "total_requests": 20,
+      "total_time_s": 0.965,
+      "throughput_req_per_s": 20.71,
+      "p50_s": 0.4623,
+      "p95_s": 0.5685,
+      "p99_s": 0.5685,
+      "success_rate": 100.0
+    },
+    {
+      "concurrency": 25,
+      "total_requests": 50,
+      "total_time_s": 2.368,
+      "throughput_req_per_s": 21.11,
+      "p50_s": 1.05,
+      "p95_s": 1.2212,
+      "p99_s": 1.6341,
+      "success_rate": 100.0
+    },
+    {
+      "concurrency": 50,
+      "total_requests": 100,
+      "total_time_s": 7.271,
+      "throughput_req_per_s": 13.75,
+      "p50_s": 2.6949,
+      "p95_s": 5.2619,
+      "p99_s": 5.3502,
+      "success_rate": 100.0
+    }
+  ]
+}

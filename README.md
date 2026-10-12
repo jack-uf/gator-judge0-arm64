@@ -2,6 +2,8 @@
 
 A self-contained ARM64 Judge0 stack for compiling and executing Gator++ C++ challenges on an Apple Silicon Mac. It includes the modified Judge0 Rails application, native Isolate sandbox, C++ compiler, API server, worker, PostgreSQL, and Redis.
 
+"Native" means ARM64 Linux containers running in Docker Desktop's Linux VM, without x86 emulation. Judge0 does not run directly as a macOS process.
+
 ## Requirements
 
 - An Apple Silicon Mac (M-series). `uname -m` should print `arm64`.
@@ -97,6 +99,8 @@ The API binds to `127.0.0.1:2358` by default. Its bundled passwords are developm
 The Isolate wrapper replaces unsupported cgroup flags with resource-limit equivalents. This differs from upstream cgroup accounting and should be assessed before hosting untrusted submissions for a class. To host a shared service, configure authentication, network access, passwords, and the execution host deliberately. Redis's command-line password in `docker-compose.yml` must match `REDIS_PASSWORD` if you change it.
 
 ## Checks and maintenance
+
+On October 12, 2026, this distribution was built from its exported source on an Apple Silicon Mac. The resulting image reported `arm64`, all four Compose services started, and the C++ smoke submission above returned `Accepted` with the expected output. All ten host source checks below also passed. Intel Macs and public server deployment have not been validated.
 
 With Ruby and Python installed on the host, run the source checks listed below. The wrapper check uses the host shell. These checks do not prove that Docker compilation works: also perform the submission test above.
 

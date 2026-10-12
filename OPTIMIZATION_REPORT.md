@@ -13,7 +13,7 @@ the final section reports one measurement of the final system.
 ## 1. How to reproduce
 
 ```sh
-cd /Users/jack/new_Project/native_judge0
+cd native_judge0
 docker compose up -d --build          # rebuild so the image matches HEAD
 python3 benchmarks/benchmark_suite.py --label <label>
 ```
@@ -970,11 +970,12 @@ each one owns half of the project:
 | Repository | Holds | Commits |
 | --- | --- | --- |
 | `judge0-src/` | the Rails application | the eight application commits, ending `28ce721`, then `cc32d7d` |
-| the fork root | `Dockerfile.arm64`, `isolate-wrapper.sh`, `docker-compose.yml`, `judge0.conf`, `checks/`, `benchmarks/`, and this report | `1c301ec`, `0c390c3` |
+| the fork root | `Dockerfile.arm64`, `isolate-wrapper.sh`, `docker-compose.yml`, `judge0.conf`, `checks/`, `benchmarks/`, `README.md`, `LICENSE`, and this report | `1c301ec` onward |
 
-The fork root tracks 28 files: the compose stack, the sandbox wrapper, the image
+The fork root tracks 43 files: the compose stack, the sandbox wrapper, the image
 definition, the eleven checks, the benchmark scripts that produced every number in
-this report, and this document. Both repositories are on `main`.
+this report, the raw result records they wrote, and this document. Both
+repositories are on `master`.
 
 Why this mattered is worth keeping on the record even though it is fixed. The
 previous `Dockerfile.arm64` -- the one with the five extra toolchains -- exists

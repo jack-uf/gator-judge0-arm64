@@ -1,2 +1,4 @@
-/judge0-src/
 *.log
+__pycache__/
+*.pyc
+.DS_Store

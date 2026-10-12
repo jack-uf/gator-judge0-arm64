@@ -1,10 +1,7 @@
-version: "3.8"
-
 services:
   # The API service only talks to Postgres and Redis and enqueues jobs; it never
   # runs a submission and never touches a cgroup. It therefore runs
-  # unprivileged, which is what priority 16 asks for and what keeps a compromise
-  # of the public-facing process off the host's device nodes.
+  # unprivileged so it cannot access the host's device nodes.
   #
   # The worker keeps `privileged: true`: Isolate needs to write cgroup
   # delegation and mount sandbox filesystems. That grant is the reason the two
@@ -21,7 +18,7 @@ services:
       - ./judge0.conf:/api/judge0.conf:ro
     env_file: judge0.conf
     ports:
-      - "2358:2358"
+      - "127.0.0.1:2358:2358"
     restart: unless-stopped
     depends_on:
       - db
@@ -29,6 +26,7 @@ services:
 
   worker:
     image: judge0:arm64-native
+    pull_policy: never
     command: ["./scripts/workers"]
     volumes:
       - ./judge0-src:/api

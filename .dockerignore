@@ -1,0 +1,9 @@
+.git
+**/.git
+**/__pycache__
+**/*.pyc
+**/.DS_Store
+judge0-src/log/*
+judge0-src/tmp/*
+judge0-src/environment
+benchmarks

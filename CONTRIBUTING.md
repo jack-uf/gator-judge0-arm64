@@ -32,7 +32,13 @@ For a runtime change, rebuild and wait for all services to be ready:
 docker compose up -d --build --wait --wait-timeout 180
 ```
 
-Run the C++ example in the README. Changes to submissions should also be exercised with compiler errors, stdin, and any additional files affected by the change.
+Run the C++ example in the README, then check submissions with stdin, an extra header file, compiler errors, and a time limit:
+
+```sh
+python3 checks/check_submission.py
+```
+
+This check submits four programs to the running local instance and polls for their results, as the Gator++ backend does. It is separate from the source checks and needs Docker running. Add cases when changing submission behavior that these examples do not cover.
 
 If you change the precompiled header, stop sending submissions while running this additional check:
 

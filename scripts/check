@@ -1,0 +1,20 @@
+#!/bin/sh
+# Run the repository's source checks on the host; no Docker services are needed.
+set -eu
+cd "$(dirname "$0")/.."
+
+for tool in ruby python3; do
+  command -v "$tool" >/dev/null 2>&1 || {
+    echo "Missing $tool. See CONTRIBUTING.md for contributor requirements." >&2
+    exit 1
+  }
+done
+
+for check in checks/check_*.rb; do
+  echo "Checking $check"
+  ruby "$check"
+done
+sh checks/check_isolate_wrapper.sh
+python3 checks/check_saturation_sampler.py
+python3 checks/check_pool_structure.py
+echo "All source checks passed."

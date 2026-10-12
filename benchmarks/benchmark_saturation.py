@@ -109,11 +109,11 @@ from benchmark_pch import (  # noqa: E402  (path insert has to come first)
 
 CONTAINERS = {
     "worker": CONTAINER,
-    "server": "native_judge0-server-1",
-    "db": "native_judge0-db-1",
-    "redis": "native_judge0-redis-1",
+    "server": "gator-judge0-arm64-server-1",
+    "db": "gator-judge0-arm64-db-1",
+    "redis": "gator-judge0-arm64-redis-1",
 }
-NETWORK = "native_judge0_default"
+NETWORK = "gator-judge0-arm64_default"
 IMAGE = "judge0:arm64-native"
 # POST /submissions?wait=true answers 201 Created, not 200: the row is created and
 # then waited on. Nothing else is this API's contract, so the harness accepts 201
@@ -122,7 +122,7 @@ IMAGE = "judge0:arm64-native"
 HTTP_ACCEPTED = 201
 LOADGEN_NAME = "judge0-saturation-loadgen"
 LOADGEN_DIR = "/tmp"
-WORK_DIR = Path("/private/tmp/judge0-sat")
+WORK_DIR = Path("/tmp/gator-judge0-sat")
 SAMPLE_INTERVAL_S = 0.25
 # The compiler the C++ language row actually runs, and the directory the PCH
 # gate offers on the include path (app/services/pch.rb). Both are asserted in

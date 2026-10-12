@@ -17,16 +17,16 @@ Clone the repository and start it:
 ```sh
 git clone https://github.com/jack-uf/gator-judge0-arm64.git
 cd gator-judge0-arm64
-docker compose up -d --build
+docker compose up -d --build --wait --wait-timeout 180
 ```
 
-The first build takes a few minutes. Once it finishes, check that Judge0 responds:
+The first build takes a few minutes. The command waits until Judge0 is ready. Then check that it responds:
 
 ```sh
 curl -fsS http://localhost:2358/languages
 ```
 
-You should see a list of supported languages. If the connection fails, wait a moment and try again.
+You should see a list of supported languages. If startup fails or times out, use the troubleshooting commands below.
 
 ## Connect Gator++
 
@@ -43,7 +43,15 @@ GRID_LOCAL_RUNNER=false
 
 Restart the backend, then open Gator Phone → Grid challenges and run a challenge.
 
-Each collaborator starts Judge0 on their own Mac. These settings assume the backend runs directly on that same Mac. If the backend also runs in Docker, connect it to Judge0's Docker network and use `http://server:2358` instead.
+Each collaborator starts Judge0 on their own Mac. These settings assume the backend runs directly on that same Mac.
+
+If your backend runs in Docker, connect its running container to Judge0's network (replace `YOUR_BACKEND_CONTAINER` with its name):
+
+```sh
+docker network connect gator-judge0-arm64_default YOUR_BACKEND_CONTAINER
+```
+
+Set `JUDGE0_BASE_URL=http://server:2358` for that backend. If its container is recreated, reconnect it. For a permanent connection, add `gator-judge0-arm64_default` as an external network in the backend's Compose file.
 
 ## Try a C++ program
 
@@ -64,9 +72,9 @@ Run these commands from the repository folder:
 
 ```sh
 docker compose down                 # stop Judge0; keep saved submissions
-docker compose up -d                # start it again
-git pull                            # get the latest repository changes
-docker compose up -d --build        # rebuild and start after an update
+docker compose up -d --wait --wait-timeout 180  # start it again
+git pull --ff-only                  # get the latest repository changes
+docker compose up -d --build --wait --wait-timeout 180  # rebuild after an update
 ```
 
 ## If something goes wrong
@@ -82,9 +90,12 @@ docker compose logs --tail=100 server worker db redis
 - **Port 2358 is already in use:** stop the other Judge0 instance before starting this one.
 - **Judge0 responds, but a submission stays queued:** check the worker logs for an error.
 - **Gator++ cannot connect:** confirm the backend settings above and restart the backend.
+- **Git refuses an update because of local changes:** commit your changes on a branch before updating. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 This setup is for local use. It listens at `http://localhost:2358` and has no API authentication configured.
 
 ## License
 
 GPL-3.0. Based on [Judge0](https://github.com/judge0/judge0). See [LICENSE](LICENSE) and [SOURCE_PROVENANCE.md](SOURCE_PROVENANCE.md) for licensing and source details.
+
+To make changes, see [CONTRIBUTING.md](CONTRIBUTING.md).

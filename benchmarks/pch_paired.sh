@@ -1,7 +1,7 @@
 #!/bin/sh
 # Paired measurement of what the precompiled header does to the compile itself.
 #
-#   docker exec -i -u root native_judge0-worker-1 sh -s < benchmarks/pch_paired.sh
+#   docker compose exec -T -u root worker sh -s < benchmarks/pch_paired.sh
 #
 # The cases have to be in the box already; `benchmark_pch_paired.py` writes them
 # and reads this script's output back.

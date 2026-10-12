@@ -1,0 +1,20 @@
+name: Source checks
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  source:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install check dependencies
+        run: sudo apt-get update && sudo apt-get install -y ruby python3
+      - name: Run source checks
+        run: sh scripts/check
+      - name: Validate Docker configuration
+        run: docker compose config --quiet

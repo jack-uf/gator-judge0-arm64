@@ -40,7 +40,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 BASE_URL = "http://localhost:2358"
-CONTAINER = "native_judge0-worker-1"
+CONTAINER = "gator-judge0-arm64-worker-1"
 CPP = 54
 ROOT = Path(__file__).resolve().parent.parent
 

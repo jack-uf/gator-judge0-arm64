@@ -9,6 +9,9 @@ FROM ubuntu:22.04 AS isolate-builder
 
 ENV DEBIAN_FRONTEND=noninteractive
 
+RUN test "$(dpkg --print-architecture)" = arm64 || \
+    { echo "This image requires ARM64. Use an Apple Silicon Mac with Docker Desktop." >&2; exit 1; }
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     build-essential \
@@ -18,8 +21,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-RUN git clone --depth 1 https://github.com/ioi/isolate.git /tmp/isolate && \
+RUN git init /tmp/isolate && \
     cd /tmp/isolate && \
+    git remote add origin https://github.com/ioi/isolate.git && \
+    git fetch --depth 1 origin 8f185bb37f3f23e29b33b0c7727c91c13429abe3 && \
+    git checkout --detach FETCH_HEAD && \
     make isolate && \
     install -d /dist/bin /dist/etc && \
     install -m 4755 isolate /dist/bin/isolate.bin && \

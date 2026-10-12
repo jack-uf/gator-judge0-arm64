@@ -1,3 +1,5 @@
+name: gator-judge0-arm64
+
 services:
   # The API service only talks to Postgres and Redis and enqueues jobs; it never
   # runs a submission and never touches a cgroup. It therefore runs
@@ -11,6 +13,7 @@ services:
       context: .
       dockerfile: Dockerfile.arm64
     image: judge0:arm64-native
+    pull_policy: never
     volumes:
       - ./judge0-src:/api
       - ./isolate-wrapper.sh:/usr/local/bin/isolate:ro
@@ -20,9 +23,17 @@ services:
     ports:
       - "127.0.0.1:2358:2358"
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "--max-time", "3", "http://localhost:2358/languages/54"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 60s
     depends_on:
-      - db
-      - redis
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
 
   worker:
     image: judge0:arm64-native
@@ -36,10 +47,23 @@ services:
     env_file: judge0.conf
     privileged: true
     restart: unless-stopped
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          curl -fsS --max-time 3 http://server:2358/workers |
+          ruby -rjson -e 'exit(JSON.parse(STDIN.read).any? { |q| q["queue"] == ENV.fetch("JUDGE0_VERSION") && q["available"].to_i >= Integer(ENV.fetch("COUNT")) } ? 0 : 1)'
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
     depends_on:
-      - db
-      - redis
-      - server
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      server:
+        condition: service_healthy
 
   db:
     image: postgres:16
@@ -47,12 +71,22 @@ services:
     volumes:
       - postgres-data:/var/lib/postgresql/data
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
+      interval: 5s
+      timeout: 5s
+      retries: 12
 
   redis:
     image: redis:7
-    command: ["redis-server", "--appendonly", "no", "--requirepass", "judge0"]
+    command: ["sh", "-c", "exec redis-server --appendonly no --requirepass \"$$REDIS_PASSWORD\""]
     env_file: judge0.conf
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "REDISCLI_AUTH=\"$$REDIS_PASSWORD\" redis-cli ping | grep -qx PONG"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
 
 volumes:
   postgres-data:

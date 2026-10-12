@@ -10,10 +10,12 @@ the final section reports one measurement of the final system.
 
 ---
 
+These measurements describe the original development environment. The current shared setup uses two workers; rerunning a benchmark with current defaults will not reproduce the historical worker count. See CONTRIBUTING.md for current change and verification instructions.
+
 ## 1. How to reproduce
 
 ```sh
-cd native_judge0
+cd gator-judge0-arm64
 docker compose up -d --build          # rebuild so the image matches HEAD
 python3 benchmarks/benchmark_suite.py --label <label>
 ```
@@ -32,7 +34,7 @@ ruby checks/check_language_seed.rb      # 11 languages seeded, and they match th
 ruby checks/check_pch.rb                # the precompiled-header gate, against real files
 python3 checks/check_saturation_sampler.py  # the sampler reads the queue that exists
 python3 checks/check_pool_structure.py      # section 17's pool readings, re-derived
-docker exec -i -u root native_judge0-worker-1 sh -s < checks/check_pch.sh
+docker compose exec -T -u root worker sh -s < checks/check_pch.sh
                                         # ...and the same gate through a real Isolate compile
 ```
 

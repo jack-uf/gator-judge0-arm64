@@ -6,6 +6,8 @@ The application in `judge0-src/` was exported from local Judge0 fork commit `cc3
 
 The outer repository retains the ARM64 stack's development history. `OPTIMIZATION_REPORT.md` and `benchmarks/` describe historical measurements from that development environment. This distribution explicitly starts two worker processes and caps the queue at 20; historical benchmark concurrency numbers are not a promise about this profile.
 
-Judge0 and this derivative are GPL-3.0. License texts are included at `LICENSE` and `judge0-src/LICENSE`. Isolate is downloaded and compiled by `Dockerfile.arm64` from https://github.com/ioi/isolate during the image build; its revision is not pinned. Changes upstream can therefore affect a later rebuild.
+Judge0 and this derivative are GPL-3.0. License texts are included at `LICENSE` and `judge0-src/LICENSE`. Isolate is downloaded and compiled by `Dockerfile.arm64` from https://github.com/ioi/isolate at commit `8f185bb37f3f23e29b33b0c7727c91c13429abe3`. Updating that commit requires an explicit Dockerfile change. Ubuntu packages and image tags remain moving dependencies.
+
+The export is the starting point, not a frozen copy. Changes after the export are recorded in this repository's Git history. On October 12, 2026, the server and worker launch scripts were changed to keep configuration values out of service logs. The application itself remains licensed under GPL-3.0. This distribution is a community derivative, not an official Judge0 release.
 
 Maintain application changes directly in `judge0-src/`, and include them in the same repository commit as corresponding Docker, checks, or documentation changes. Keep the language seed and installed toolchains aligned. Never replace this directory with an unmodified upstream checkout: the ARM64 runtime and optimization changes are part of the current implementation.

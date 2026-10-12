@@ -1,7 +1,7 @@
 #!/bin/sh
 # End-to-end checks for the precompiled header, in the shipped ARM64 image.
 #
-#   docker exec -i -u root native_judge0-worker-1 sh -s < checks/check_pch.sh
+#   docker compose exec -T -u root worker sh -s < checks/check_pch.sh
 #
 # The host check (`checks/check_pch.rb`) proves the gate refuses a damaged PCH.
 # This one proves the things only the image can answer:

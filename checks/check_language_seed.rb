@@ -11,8 +11,7 @@
 #
 # What this cannot check is whether the interpreter binaries are present -- that
 # is a property of the built image, not of the source. It was measured once, in
-# a container, and recorded in OPTIMIZATION_REPORT.md under "C++-only ARM64
-# worker image"; re-run that probe after changing the Dockerfile's package list.
+# a container; run the submission checks after changing the Dockerfile's packages.
 ROOT = File.expand_path("..", __dir__)
 SEEDS = File.join(ROOT, "judge0-src/db/seeds.rb")
 
@@ -66,8 +65,10 @@ check supported == supported.sort,
 # The C/C++ entries are the ones Gator++ submits against. If an upstream id is
 # ever renumbered, this is the assertion that says so.
 cpp_ids = LANGUAGES_BY_ID.select { |_, l| l[:name].match?(/\AC\+\+ \(GCC/) }.keys
-check (cpp_ids - supported).empty?,
-      "every C++ (GCC) language is seeded (#{cpp_ids.sort.inspect})"
+check (cpp_ids & supported) == [54],
+      "Gator++ uses one C++ compiler definition, id 54"
+check CREATED.find { |row| row[:id] == 54 }[:compile_cmd] == "/usr/bin/g++ %s main.cpp",
+      "the C++ definition invokes the installed native compiler"
 
 # --- every supported id is real, and usable ---------------------------------
 missing = supported - LANGUAGES_BY_ID.keys

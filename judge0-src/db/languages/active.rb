@@ -1,3 +1,4 @@
+# Modified for Gator++ on 2026-10-12: native runtime names and executable paths.
 @languages ||= []
 @languages +=
 [
@@ -25,10 +26,10 @@
   },
   {
     id: 46,
-    name: "Bash (5.0.0)",
+    name: "Bash (5.1)",
     is_archived: false,
     source_file: "script.sh",
-    run_cmd: "/usr/local/bash-5.0/bin/bash script.sh"
+    run_cmd: "/bin/bash script.sh"
   },
   {
     id: 47,
@@ -56,10 +57,10 @@
   },
   {
     id: 50,
-    name: "C (GCC 9.2.0)",
+    name: "C (GCC 11)",
     is_archived: false,
     source_file: "main.c",
-    compile_cmd: "/usr/local/gcc-9.2.0/bin/gcc %s main.c",
+    compile_cmd: "/usr/bin/gcc %s main.c",
     run_cmd: "./a.out"
   },
   {
@@ -88,11 +89,11 @@
   },
   {
     id: 54,
-    name: "C++ (GCC 9.2.0)",
+    name: "C++ (GCC 11)",
     is_archived: false,
     source_file: "main.cpp",
-    compile_cmd: "/usr/local/gcc-9.2.0/bin/g++ %s main.cpp",
-    run_cmd: "LD_LIBRARY_PATH=/usr/local/gcc-9.2.0/lib64 ./a.out"
+    compile_cmd: "/usr/bin/g++ %s main.cpp",
+    run_cmd: "./a.out"
   },
   {
     id: 55,
@@ -129,7 +130,7 @@
     is_archived: false,
     source_file: "main.f90",
     compile_cmd: "/usr/local/gcc-9.2.0/bin/gfortran %s main.f90",
-    run_cmd: "LD_LIBRARY_PATH=/usr/local/gcc-9.2.0/lib64 ./a.out"
+    run_cmd: "./a.out"
   },
   {
     id: 60,
@@ -325,7 +326,7 @@
   },
   {
     id: 85,
-    name: "Perl (5.28.1)",
+    name: "Perl (5.34)",
     is_archived: false,
     source_file: "script.pl",
     run_cmd: "/usr/bin/perl script.pl"

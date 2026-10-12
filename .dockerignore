@@ -6,6 +6,5 @@
 judge0-src/log/*
 judge0-src/tmp/*
 judge0-src/environment
-benchmarks
 .env
 .env.*

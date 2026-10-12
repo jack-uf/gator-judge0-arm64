@@ -32,8 +32,8 @@ def check_eq(actual, expected, message)
 end
 
 # --- exact conversions -------------------------------------------------------
-check_eq ExecPlan.parse("/usr/local/gcc-9.2.0/bin/g++ -O0 -pipe main.cpp"),
-         { argv: ["/usr/local/gcc-9.2.0/bin/g++", "-O0", "-pipe", "main.cpp"], env: {} },
+check_eq ExecPlan.parse("/usr/bin/g++ -O0 -pipe main.cpp"),
+         { argv: ["/usr/bin/g++", "-O0", "-pipe", "main.cpp"], env: {} },
          "C++ compile converts to argv"
 
 check_eq ExecPlan.parse("LD_LIBRARY_PATH=/usr/local/gcc-9.2.0/lib64 ./a.out"),

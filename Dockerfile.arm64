@@ -48,22 +48,7 @@ ENV JUDGE0_HOMEPAGE="https://judge0.com" \
     PORT=2358 \
     RAILS_ENV=production
 
-# Install system utilities, Ruby runtime, and the C++ toolchain.
-#
-# This image is deliberately C++-only: Gator++ is a C++ game and nothing in the
-# submission path needs Java, Node, Go, Rust, or Python. Those toolchains were
-# dropped because they are the bulk of the image and none of them is reachable
-# from the C++ path -- see OPTIMIZATION_REPORT.md, section "C++-only ARM64
-# worker image", for the measured size and idle-memory effect.
-#
-# Consequence, stated plainly: the seed is filtered to the languages this image
-# can run (`SUPPORTED_LANGUAGE_IDS` in judge0-src/db/seeds.rb), so a submission
-# in one of the dropped toolchains is refused by validation -- HTTP 422, naming
-# the language -- instead of being accepted and handed back a shell "not found"
-# as its compile output. The two files have to move together: recovery is to
-# re-add the package to the list below, rebuild, re-probe the language's
-# compile_cmd and run_cmd paths inside the container, and add its id back to
-# that list.
+# Install the runtime and the native toolchain used by the language seed.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     sudo \
     cron \
@@ -107,25 +92,6 @@ RUN mkdir -p /var/local/lib/isolate /run/isolate/locks
 COPY isolate-wrapper.sh /usr/local/bin/isolate
 RUN chmod 755 /usr/local/bin/isolate && chmod 4755 /usr/local/bin/isolate.bin
 
-# Create compatibility symlinks for the C++ compiler paths that Judge0's
-# language definitions name. All three GCC version directories point at the one
-# toolchain this image ships, which is what makes the C++ (GCC 7.4.0 / 8.3.0 /
-# 9.2.0) entries in the seed interchangeable here.
-RUN mkdir -p \
-    /usr/local/gcc-9.2.0/bin /usr/local/gcc-8.3.0/bin /usr/local/gcc-7.4.0/bin \
-    /usr/local/gcc-9.2.0/lib64 /usr/local/gcc-8.3.0/lib64 /usr/local/gcc-7.4.0/lib64 \
-    /usr/local/bash-5.0/bin && \
-    ln -sf /usr/bin/gcc /usr/local/gcc-9.2.0/bin/gcc && \
-    ln -sf /usr/bin/g++ /usr/local/gcc-9.2.0/bin/g++ && \
-    ln -sf /usr/bin/gcc /usr/local/gcc-8.3.0/bin/gcc && \
-    ln -sf /usr/bin/g++ /usr/local/gcc-8.3.0/bin/g++ && \
-    ln -sf /usr/bin/gcc /usr/local/gcc-7.4.0/bin/gcc && \
-    ln -sf /usr/bin/g++ /usr/local/gcc-7.4.0/bin/g++ && \
-    ln -sf /usr/lib/aarch64-linux-gnu /usr/local/gcc-9.2.0/lib64 && \
-    ln -sf /usr/lib/aarch64-linux-gnu /usr/local/gcc-8.3.0/lib64 && \
-    ln -sf /usr/lib/aarch64-linux-gnu /usr/local/gcc-7.4.0/lib64 && \
-    ln -sf /bin/bash /usr/local/bash-5.0/bin/bash
-
 # ------------------------------------------------------------------------------
 # Precompiled header for the C++ compile path
 # ------------------------------------------------------------------------------
@@ -139,9 +105,7 @@ RUN mkdir -p \
 # identity it has to match is:
 #
 #   architecture      aarch64 -- the only architecture this image builds for
-#   compiler binary   /usr/bin/g++, the binary every /usr/local/gcc-*/bin/g++
-#                     symlink above points at, i.e. the one the C++ language
-#                     rows actually invoke
+#   compiler binary   /usr/bin/g++, the compiler the C++ language invokes
 #   compiler version  whatever this base image ships (11.4.0 today)
 #   C++ standard      the driver's default for C++ (gnu++17 on GCC 11), because
 #                     the worker does not pass -std

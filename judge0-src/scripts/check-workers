@@ -1,0 +1,27 @@
+#!/usr/bin/env ruby
+# Gator++ worker readiness check, added 2026-10-12.
+# Check this container's registered, live workers even before a queue exists.
+require "redis"
+require "resque"
+require "socket"
+
+port = ENV.fetch("REDIS_PORT", "")
+Resque.redis = Redis.new(
+  host: ENV.fetch("REDIS_HOST"),
+  port: port.empty? ? 6379 : Integer(port),
+  password: ENV.fetch("REDIS_PASSWORD")
+)
+namespace = ENV.fetch("RESQUE_NAMESPACE", "")
+Resque.redis.namespace = namespace unless namespace.empty?
+
+live = Resque.workers.count do |worker|
+  host, pid = worker.id.split(":", 3)
+  next false unless host == Socket.gethostname && worker.queues.include?(ENV.fetch("JUDGE0_VERSION"))
+  begin
+    Process.kill(0, Integer(pid))
+    true
+  rescue Errno::ESRCH
+    false
+  end
+end
+abort "Only #{live} live workers registered; expected #{ENV.fetch('COUNT')}" if live < Integer(ENV.fetch("COUNT"))

@@ -48,11 +48,7 @@ services:
     privileged: true
     restart: unless-stopped
     healthcheck:
-      test:
-        - CMD-SHELL
-        - >-
-          curl -fsS --max-time 3 http://server:2358/workers |
-          ruby -rjson -e 'exit(JSON.parse(STDIN.read).any? { |q| q["queue"] == ENV.fetch("JUDGE0_VERSION") && q["available"].to_i >= Integer(ENV.fetch("COUNT")) } ? 0 : 1)'
+      test: ["CMD", "ruby", "/api/scripts/check-workers"]
       interval: 5s
       timeout: 5s
       retries: 12

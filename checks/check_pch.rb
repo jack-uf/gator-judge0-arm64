@@ -136,9 +136,9 @@ end
 # The include path is appended to the command string, so it has to survive
 # ExecPlan's round-trip check; if it did not, C++ compiles would silently fall
 # back to the generated-script path.
-plan = ExecPlan.parse("/usr/local/gcc-9.2.0/bin/g++ -O0 -pipe -I#{Pch::DIR} main.cpp")
+plan = ExecPlan.parse("/usr/bin/g++ -O0 -pipe -I#{Pch::DIR} main.cpp")
 check plan, "the C++ compile command with the PCH include path still parses"
-check_eq plan && plan[:argv], ["/usr/local/gcc-9.2.0/bin/g++", "-O0", "-pipe", "-I#{Pch::DIR}", "main.cpp"],
+check_eq plan && plan[:argv], ["/usr/bin/g++", "-O0", "-pipe", "-I#{Pch::DIR}", "main.cpp"],
          "the include path reaches the sandbox argv as one argument, in order"
 check_eq plan && plan[:env], {}, "the include path does not turn into an env assignment"
 

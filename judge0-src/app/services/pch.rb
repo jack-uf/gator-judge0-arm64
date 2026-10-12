@@ -1,11 +1,12 @@
 # Precompiled headers for the C++ compile path.
+# Modified for Gator++ on 2026-10-12: document the current native build.
 #
 # `Dockerfile.arm64` builds `iostream.gch` at image-build time and writes a
 # SHA256 manifest next to it. Every C++ compile then gets that directory on its
 # include path, so `#include <iostream>` -- and the whole `<ostream>` family it
 # pulls in -- is read from the precompiled form instead of being parsed again
-# for every submission. Measured effect and the exact identity the PCH has to
-# match are in OPTIMIZATION_REPORT.md, section "Precompiled headers".
+# for every submission. The compiler and flags must match those used by the
+# Dockerfile when building the header.
 #
 # The gate below is what makes the optimisation safe to ship:
 #

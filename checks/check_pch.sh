@@ -21,7 +21,7 @@
 set -u
 
 PCHDIR=/usr/local/pch/c++
-CXX=/usr/local/gcc-9.2.0/bin/g++
+CXX=/usr/bin/g++
 WORK=$(mktemp -d)
 BOX=""
 BOXDIR=""

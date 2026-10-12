@@ -12,13 +12,13 @@ git pull --ff-only
 git switch -c your-change
 ```
 
-Edit the application in `judge0-src/`. It is part of this repository, not a separate checkout. Change Docker settings at the repository root. Keep supported languages in `judge0-src/db/seeds.rb` aligned with the compilers installed in `Dockerfile.arm64`.
+Edit the application in `judge0-src/`. It is part of this repository, not a separate checkout. The root `Dockerfile.arm64` and `docker-compose.yml` are the build and startup configuration. Keep supported languages in `judge0-src/db/seeds.rb` aligned with the compilers installed in `Dockerfile.arm64`. Gator++ uses C++ language id 54 with `/usr/bin/g++`; older GCC aliases are not supported.
 
 Before committing, review `git diff`. Keep `.env` files, logs, generated files, and personal credentials out of commits. The checked-in `judge0.conf` contains shared local defaults; changes to it affect everyone's setup.
 
 ## Check your change
 
-The source checks need Ruby 3.0 and Python 3 installed on your host. They use only their standard libraries. Run them together:
+The source checks need Ruby 3.0 installed on your host. They use only its standard library and the host shell. Run them together:
 
 ```sh
 sh scripts/check
@@ -38,7 +38,7 @@ Run the C++ example in the README, then check submissions with stdin, an extra h
 python3 checks/check_submission.py
 ```
 
-This check submits four programs to the running local instance and polls for their results, as the Gator++ backend does. It is separate from the source checks and needs Docker running. Add cases when changing submission behavior that these examples do not cover.
+This check needs Python 3 and Docker running. It uses only Python's standard library, submits four programs to the running local instance, and polls for their results, as the Gator++ backend does. It is separate from the source checks. Add cases when changing submission behavior that these examples do not cover.
 
 If you change the precompiled header, stop sending submissions while running this additional check:
 
@@ -61,5 +61,3 @@ Explain what changed, why, and which checks you ran. Another collaborator should
 The Isolate sandbox source is pinned to a commit in `Dockerfile.arm64`. Change that commit deliberately and test a rebuild. Ubuntu packages and Docker image tags can still change over time, so builds are not guaranteed to be byte-for-byte identical.
 
 `SOURCE_PROVENANCE.md` records the source origin and license. Preserve existing notices and add a dated modification note when changing upstream files. This project is a derivative of Judge0; it is not an official Judge0 release.
-
-`OPTIMIZATION_REPORT.md` and the JSON files in `benchmarks/` are historical measurements, not instructions required to use Judge0. Do not rewrite recorded measurements to match a newer run. Benchmarks create load and temporary files; run them separately from normal development and save new results under a new label.

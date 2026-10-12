@@ -1,3 +1,5 @@
+> This is the upstream Judge0 reference README. For Gator++ setup and development, use the [repository README](../README.md) and [contributor guide](../CONTRIBUTING.md). Modified for Gator++ on October 12, 2026.
+
 [![Judge0 Wallpaper](./.github/Judge0%20Wallpaper%2002%20Center%20White%208192x4608.png)](https://judge0.com)
 
 # Judge0
